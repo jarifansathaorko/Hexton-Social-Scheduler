@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+/*
+ * Design tokens.
+ *
+ * A small, deliberate set rather than an arbitrary palette: each token maps to a
+ * *meaning* the product already defines in `05-visual-uiux-prd.md` — the state cue
+ * colours (grey outline, blue progress, amber attention, red warning, green filled)
+ * and the three type scales. Screens pick a semantic token; they do not pick a hex
+ * value, which is what stops four slightly-different ambers appearing over time.
+ */
+@theme {
+  --color-canvas: #0b0d10;
+  --color-surface: #14181d;
+  --color-surface-raised: #1b2027;
+  --color-edge: #262d36;
+  --color-edge-strong: #37414e;
+
+  --color-ink: #e8edf3;
+  --color-ink-muted: #9aa7b6;
+  --color-ink-faint: #66727f;
+
+  /* State cues, taken verbatim from the job-state display map. */
+  --color-cue-neutral: #8b97a5;
+  --color-cue-progress: #4c9aff;
+  --color-cue-attention: #f2b01e;
+  --color-cue-warning: #ff5f56;
+  --color-cue-success: #3fb950;
+
+  --font-sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+
+  --radius-card: 10px;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus is visible everywhere, without a mouse-dependent outline colour. */
+:focus-visible {
+  outline: 2px solid var(--color-cue-progress);
+  outline-offset: 2px;
+}
+
+/* Respect an operator who asked their OS for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-[var(--radius-card)] border border-edge bg-surface;
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 rounded-md border border-edge-strong bg-surface-raised px-3 py-1.5 text-sm text-ink transition-colors hover:border-cue-progress hover:text-white disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-primary {
+    @apply border-transparent bg-cue-progress text-black hover:bg-cue-progress/90 hover:text-black;
+  }
+  .btn-danger {
+    @apply border-cue-warning/50 text-cue-warning hover:border-cue-warning hover:bg-cue-warning/10;
+  }
+  .input {
+    @apply w-full rounded-md border border-edge bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-cue-progress focus:outline-none;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-ink-muted;
+  }
+}

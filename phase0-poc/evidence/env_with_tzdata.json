@@ -1,0 +1,45 @@
+﻿{
+  "captured_at_utc": "2026-10-11T09:18:28.402761+00:00",
+  "platform": {
+    "system": "Windows",
+    "release": "11",
+    "version": "10.0.26200",
+    "machine": "AMD64",
+    "python": "3.14.7",
+    "python_implementation": "CPython"
+  },
+  "identity": {
+    "user": "jarif",
+    "domain": "DESKTOP-PT2TMIR",
+    "computer": "DESKTOP-PT2TMIR",
+    "elevated": false
+  },
+  "timezone": {
+    "windows_timezone_id": "Bangladesh Standard Time",
+    "tzdata_package_installed": true,
+    "iana_lookup": {
+      "Asia/Dhaka": "ok",
+      "America/Los_Angeles": "ok",
+      "UTC": "ok"
+    }
+  },
+  "credential_store": {
+    "available": true,
+    "backend": "windows_credential_manager",
+    "round_trip": true,
+    "enumeration_count": 1,
+    "error": null,
+    "cleaned_up": true
+  },
+  "non_elevated_startup_mechanisms": {
+    "hkcu_run_key": {
+      "writable": true,
+      "value_read_back": "cmd /c echo probe"
+    },
+    "startup_folder": {
+      "writable": true,
+      "path": "C:\\Users\\jarif\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+    }
+  }
+}
+

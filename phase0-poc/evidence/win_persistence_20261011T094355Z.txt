@@ -1,0 +1,80 @@
+﻿
+=== Environment ===
+captured_at_utc                    2026-10-11T09:43:55.7967406Z
+user                               DESKTOP-PT2TMIR\jarif
+user_sid                           S-1-5-21-2778381134-3126350832-306827401-1001
+is_elevated                        False
+computer                           DESKTOP-PT2TMIR
+os_caption                         Microsoft Windows 11 Pro
+os_build                           26200
+powershell                         5.1.26100.9168
+python                             C:\Python314\python.exe
+
+=== P1-P3  Credential store and timezone (via scripts/probe_env.py) ===
+interpreter_used                   E:\project\Hexton Scheduler\phase0-poc\.venv\Scripts\python.exe
+{
+  "captured_at_utc": "2026-10-11T09:43:56.157382+00:00",
+  "platform": {
+    "system": "Windows",
+    "release": "11",
+    "version": "10.0.26200",
+    "machine": "AMD64",
+    "python": "3.14.7",
+    "python_implementation": "CPython",
+    "executing_interpreter": "E:\\project\\Hexton Scheduler\\phase0-poc\\.venv\\Scripts\\python.exe"
+  },
+  "identity": {
+    "user": "jarif",
+    "domain": "DESKTOP-PT2TMIR",
+    "computer": "DESKTOP-PT2TMIR",
+    "elevated": false
+  },
+  "timezone": {
+    "windows_timezone_id": "Bangladesh Standard Time",
+    "tzdata_package_installed": true,
+    "iana_lookup": {
+      "Asia/Dhaka": "ok",
+      "America/Los_Angeles": "ok",
+      "UTC": "ok"
+    }
+  },
+  "credential_store": {
+    "available": true,
+    "backend": "windows_credential_manager",
+    "round_trip": true,
+    "enumeration_count": 1,
+    "error": null,
+    "cleaned_up": true
+  },
+  "non_elevated_startup_mechanisms": {
+    "hkcu_run_key": {
+      "writable": true,
+      "value_read_back": "cmd /c echo probe"
+    },
+    "startup_folder": {
+      "writable": true,
+      "path": "C:\\Users\\jarif\\AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs\\Startup"
+    }
+  }
+}
+
+=== P4  Register an "At log on" scheduled task ===
+P4_onlogon_register                DENIED - Access is denied.
+P4_interpretation                  Requires an elevated prompt. Recorded as BLOCKED, not as a failure of the design.
+
+=== P5  Can a SYSTEM-principal task read the interactive user secrets? ===
+P5_system_register                 schtasks : ERROR: Access is denied.
+At E:\project\Hexton Scheduler\phase0-poc\scripts\win_persistence_probe.ps1:100 char:5
++     schtasks /create /tn $sysName /tr "cmd /c exit 0" /sc once /st 23 ...
++     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (ERROR: Access is denied.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+=== P6  Non-elevated autostart mechanisms ===
+P6_hkcu_run_key                    writable, read back = cmd /c exit 0, then removed
+P6_startup_folder                  writable = C:\Users\jarif\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup, then removed
+
+=== Cleanup ===
+cleanup_onlogon_task               nothing was created
+cleanup_system_task                attempted (may not have existed)
+final_task_check                   no HextonPoC tasks remain
