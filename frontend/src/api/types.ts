@@ -163,8 +163,36 @@ export interface OutboxRow {
   sync_key: string;
   status: string;
   attempts: number;
+  report_date: string | null;
+  schedule_id: string | null;
+  video_id: string | null;
+  upload_outcome: string | null;
   last_error: string | null;
   last_synced_at: string | null;
+  payload: Record<string, unknown>;
+}
+
+/**
+ * What one job's row would say, right now, before anything is written.
+ *
+ * Read-only and deliberately fetched on demand: an operator can check the exact claim
+ * a report row makes — including whether it would claim "Published" at all — before a
+ * single byte reaches Google.
+ */
+export interface ReportPreview {
+  schedule_id: string;
+  sync_key: string;
+  report_date: string;
+  columns: string[];
+  row: Record<string, string>;
+  claims_published: boolean;
+  video_id_present: boolean;
+  verified_publication_time_present: boolean;
+}
+
+export interface DailySummary {
+  report_date: string;
+  rows: Record<string, unknown>[];
 }
 
 export interface SheetsLimits {
@@ -393,6 +421,23 @@ export interface ValidateResult {
   issues: Issue[];
   effective_publish_at_utc: string | null;
   schedule_issues: Issue[];
+}
+
+/**
+ * `PUT /api/settings` accepts exactly these five fields and nothing else.
+ *
+ * The list is short on purpose and is mirrored from the backend's `SettingsUpdateIn`.
+ * There is no global default-privacy field, no retry-policy field and no
+ * upload-delay field, because the backend exposes none — so the settings screen must
+ * not offer one. A control with no endpoint behind it is a lie about what this build
+ * can do.
+ */
+export interface SettingsUpdate {
+  display_timezone?: string | null;
+  min_lead_minutes?: number | null;
+  warning_lead_minutes?: number | null;
+  missed_grace_minutes?: number | null;
+  retention_days?: number | null;
 }
 
 export interface Settings {

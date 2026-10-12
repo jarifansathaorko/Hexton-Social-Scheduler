@@ -1,15 +1,66 @@
 @import "tailwindcss";
 
 /*
+ * The app decides whether it is light or dark, not the operating system: an operator
+ * may want the light reference theme while their OS is dark, and the choice has to
+ * survive a reload because a tool that flips appearance every morning is unusable.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/*
  * Design tokens.
  *
  * A small, deliberate set rather than an arbitrary palette: each token maps to a
  * *meaning* the product already defines in `05-visual-uiux-prd.md` — the state cue
- * colours (grey outline, blue progress, amber attention, red warning, green filled)
- * and the three type scales. Screens pick a semantic token; they do not pick a hex
- * value, which is what stops four slightly-different ambers appearing over time.
+ * colours (grey outline, blue progress, amber attention, red warning, green filled),
+ * the purple accent the approved desktop references use for actions, and the three
+ * type scales. Screens pick a semantic token; they do not pick a hex value, which is
+ * what stops four slightly-different ambers appearing over time.
+ *
+ * Light is the default because the approved references are light first. `.dark`
+ * re-declares the same variables rather than every component growing a `dark:`
+ * sibling class, so one palette swap re-themes the whole application and a component
+ * cannot accidentally be styled for only one of the two.
  */
 @theme {
+  /* Surfaces — light (default). */
+  --color-canvas: #f4f5f7;
+  --color-surface: #ffffff;
+  --color-surface-raised: #f9fafb;
+  --color-edge: #e4e7ec;
+  --color-edge-strong: #d0d5dd;
+
+  --color-ink: #101828;
+  --color-ink-muted: #475467;
+  --color-ink-faint: #667085;
+
+  /*
+   * State cues. These encode what a job is *doing*, so they carry the same meaning in
+   * both themes; only their lightness moves, so each keeps at least AA contrast on the
+   * surface it sits on.
+   */
+  --color-cue-neutral: #667085;
+  --color-cue-progress: #155eef;
+  --color-cue-attention: #b54708;
+  --color-cue-warning: #d92d20;
+  --color-cue-success: #067647;
+
+  /* Brand. Used for the primary action and the active nav item — never for state. */
+  --color-accent: #6938ef;
+  --color-accent-hover: #531fd6;
+  --color-on-accent: #ffffff;
+
+  /* Referenced by existing markup as `text-ok` / `text-link`. */
+  --color-ok: #067647;
+  --color-link: #6938ef;
+
+  --font-sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+
+  --radius-card: 10px;
+}
+
+.dark {
   --color-canvas: #0b0d10;
   --color-surface: #14181d;
   --color-surface-raised: #1b2027;
@@ -20,20 +71,25 @@
   --color-ink-muted: #9aa7b6;
   --color-ink-faint: #66727f;
 
-  /* State cues, taken verbatim from the job-state display map. */
   --color-cue-neutral: #8b97a5;
   --color-cue-progress: #4c9aff;
   --color-cue-attention: #f2b01e;
   --color-cue-warning: #ff5f56;
   --color-cue-success: #3fb950;
 
-  --font-sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+  --color-accent: #8b5cf6;
+  --color-accent-hover: #a78bfa;
+  --color-on-accent: #0b0d10;
 
-  --radius-card: 10px;
+  --color-ok: #3fb950;
+  --color-link: #a78bfa;
 }
 
 :root {
+  color-scheme: light;
+}
+
+.dark {
   color-scheme: dark;
 }
 
@@ -53,7 +109,7 @@ body {
 
 /* Focus is visible everywhere, without a mouse-dependent outline colour. */
 :focus-visible {
-  outline: 2px solid var(--color-cue-progress);
+  outline: 2px solid var(--color-accent);
   outline-offset: 2px;
 }
 
@@ -72,17 +128,22 @@ body {
   .card {
     @apply rounded-[var(--radius-card)] border border-edge bg-surface;
   }
+  /*
+   * The hover state is a border, never a text-colour swap: swapping to white on a
+   * light surface would make the label disappear exactly when the operator points at
+   * it, and swapping text colour at all is a cue that reads as "this is a link".
+   */
   .btn {
-    @apply inline-flex items-center gap-2 rounded-md border border-edge-strong bg-surface-raised px-3 py-1.5 text-sm text-ink transition-colors hover:border-cue-progress hover:text-white disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex items-center gap-2 rounded-md border border-edge-strong bg-surface-raised px-3 py-1.5 text-sm text-ink transition-colors hover:border-accent disabled:cursor-not-allowed disabled:opacity-40;
   }
   .btn-primary {
-    @apply border-transparent bg-cue-progress text-black hover:bg-cue-progress/90 hover:text-black;
+    @apply border-transparent bg-accent text-on-accent hover:bg-accent-hover;
   }
   .btn-danger {
     @apply border-cue-warning/50 text-cue-warning hover:border-cue-warning hover:bg-cue-warning/10;
   }
   .input {
-    @apply w-full rounded-md border border-edge bg-canvas px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-cue-progress focus:outline-none;
+    @apply w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none;
   }
   .label {
     @apply mb-1 block text-xs font-medium uppercase tracking-wide text-ink-muted;

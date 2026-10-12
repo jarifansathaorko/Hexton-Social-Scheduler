@@ -85,6 +85,8 @@ export function CalendarMonth({
         </div>
       </div>
 
+      <CueLegend />
+
       <div className="card overflow-hidden">
         <div className="grid grid-cols-7 border-b border-edge bg-surface-raised">
           {WEEKDAYS.map((day) => (
@@ -101,14 +103,14 @@ export function CalendarMonth({
               <div
                 key={key}
                 className={`min-h-[110px] border-b border-r border-edge/50 p-1.5 ${
-                  date && key === todayKey ? "bg-cue-progress/[0.06]" : ""
+                  date && key === todayKey ? "bg-accent/[0.07]" : ""
                 }`}
               >
                 {date && (
                   <>
                     <div
                       className={`mb-1 text-xs ${
-                        key === todayKey ? "font-semibold text-cue-progress" : "text-ink-faint"
+                        key === todayKey ? "font-semibold text-accent" : "text-ink-faint"
                       }`}
                     >
                       {date.getDate()}
@@ -119,9 +121,11 @@ export function CalendarMonth({
                           <button
                             onClick={() => onSelect(job.id)}
                             title={`${job.title} — ${formatWhen(job.publish_at_utc)}`}
+                            aria-label={`${job.title || "(untitled)"}, ${job.display_label}, publishes ${formatWhen(job.publish_at_utc)}`}
+                            aria-pressed={job.id === selectedId}
                             className={`w-full truncate rounded border px-1.5 py-1 text-left text-[11px] ${
                               job.id === selectedId
-                                ? "border-cue-progress bg-cue-progress/10 text-ink"
+                                ? "border-accent bg-accent/10 text-ink"
                                 : `${cueClass(cueFromBackend(job.display_cue))} bg-canvas`
                             }`}
                           >
@@ -162,5 +166,34 @@ export function CalendarMonth({
         </section>
       )}
     </div>
+  );
+}
+
+/**
+ * What the five colours mean.
+ *
+ * Colour is never the only carrier: the chip beside each entry already spells out the
+ * state in words, and this legend names the cue itself. The wording is the PRD's own —
+ * "grey outline, blue progress, amber attention, red warning, green filled" — so the
+ * legend describes the *cue* without inventing a second mapping from colour to job
+ * meaning, which is exactly the duplication the canonical state map exists to prevent.
+ */
+function CueLegend() {
+  const cues: [string, string][] = [
+    ["border-cue-neutral/50", "Grey outline — neutral"],
+    ["border-cue-progress/60 bg-cue-progress/10", "Blue — in progress"],
+    ["border-cue-attention/60 bg-cue-attention/10", "Amber — needs attention"],
+    ["border-cue-warning/60 bg-cue-warning/10", "Red — warning"],
+    ["border-cue-success/60 bg-cue-success/10", "Green — done"],
+  ];
+  return (
+    <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-muted">
+      {cues.map(([classes, label]) => (
+        <li key={label} className="flex items-center gap-1.5">
+          <span className={`h-2.5 w-2.5 rounded-full border-2 ${classes}`} aria-hidden />
+          {label}
+        </li>
+      ))}
+    </ul>
   );
 }

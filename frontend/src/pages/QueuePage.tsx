@@ -34,9 +34,11 @@ export function QueuePage() {
     <div className="flex flex-col gap-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Upload queue</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Upload Queue</h1>
           <p className="mt-1 text-sm text-ink-muted">
-            Progress is read from the worker's own record, not from this tab.
+            Progress is read from the worker's own record, not from this tab. An upload
+            is shown as finished when the bytes have landed; it is only ever counted as
+            published once YouTube has been observed to say so.
           </p>
         </div>
         {!worker.data?.alive && (

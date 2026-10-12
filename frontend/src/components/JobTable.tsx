@@ -1,5 +1,4 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import type { Job, JobList } from "../api/types";
 import { ProgressBar, StatusBadge } from "./StatusBadge";
 import {
@@ -22,6 +21,10 @@ type SortKey = "publish" | "updated" | "title";
  * side by side rather than in one merged column: they are separate facts and merging
  * them is how an operator ends up believing a video is public when YouTube still has
  * it private.
+ *
+ * Opening a row is a callback rather than a navigation, so the table can live inside
+ * another section — the calendar — without that section having to know how the table
+ * addresses a selected job.
  */
 export function JobTable({
   data,
@@ -29,14 +32,21 @@ export function JobTable({
   onQuery,
   state,
   onState,
+  channels,
+  channel,
+  onChannel,
+  onOpen,
 }: {
   data: JobList | undefined;
   query: string;
   onQuery: (value: string) => void;
   state: string;
   onState: (value: string) => void;
+  channels: { id: number; title: string }[];
+  channel: string;
+  onChannel: (value: string) => void;
+  onOpen: (job: Job) => void;
 }) {
-  const navigate = useNavigate();
   const [sort, setSort] = useState<SortKey>("publish");
 
   const rows = useMemo(() => {
@@ -52,6 +62,7 @@ export function JobTable({
   }, [data, sort]);
 
   const counts = data?.states ?? {};
+  const filtered = Boolean(query || state || channel);
 
   return (
     <div className="flex flex-col gap-4">
@@ -67,9 +78,27 @@ export function JobTable({
           onChange={(e) => onQuery(e.target.value)}
         />
 
+        <label className="sr-only" htmlFor="job-channel">
+          Filter by channel
+        </label>
+        <select
+          id="job-channel"
+          className="input w-auto"
+          value={channel}
+          onChange={(e) => onChannel(e.target.value)}
+        >
+          <option value="">All channels</option>
+          <option value="none">No channel selected</option>
+          {channels.map((entry) => (
+            <option key={entry.id} value={String(entry.id)}>
+              {entry.title}
+            </option>
+          ))}
+        </select>
+
         <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Filter by state">
           <button
-            className={`btn px-2.5 py-1 text-xs ${state === "" ? "border-cue-progress text-cue-progress" : ""}`}
+            className={`btn px-2.5 py-1 text-xs ${state === "" ? "border-accent text-accent" : ""}`}
             onClick={() => onState("")}
           >
             All ({data?.total ?? 0})
@@ -77,8 +106,9 @@ export function JobTable({
           {STATE_ORDER.filter((s) => (counts[s] ?? 0) > 0).map((s) => (
             <button
               key={s}
-              className={`btn px-2.5 py-1 text-xs ${state === s ? "border-cue-progress text-cue-progress" : ""}`}
+              className={`btn px-2.5 py-1 text-xs ${state === s ? "border-accent text-accent" : ""}`}
               onClick={() => onState(state === s ? "" : s)}
+              aria-pressed={state === s}
             >
               {STATE_NAMES[s]} ({counts[s]})
             </button>
@@ -121,14 +151,14 @@ export function JobTable({
             {rows.length === 0 && (
               <tr>
                 <td colSpan={7} className="px-4 py-12 text-center text-ink-muted">
-                  {query || state
+                  {filtered
                     ? "Nothing matches this filter."
-                    : "No content yet. Add a clip from the Content page."}
+                    : "No content yet. Use Create Content to add a clip."}
                 </td>
               </tr>
             )}
             {rows.map((job) => (
-              <Row key={job.id} job={job} onOpen={() => navigate(`/content/${job.id}`)} />
+              <Row key={job.id} job={job} onOpen={() => onOpen(job)} />
             ))}
           </tbody>
         </table>
@@ -148,7 +178,8 @@ function Row({ job, onOpen }: { job: Job; onOpen: () => void }) {
       <td className="px-4 py-3">
         <button
           onClick={onOpen}
-          className="text-left font-medium text-ink hover:text-cue-progress"
+          className="text-left font-medium text-ink hover:text-accent"
+          aria-label={`Open ${job.title || "(untitled)"}`}
         >
           {job.title || "(untitled)"}
         </button>
@@ -199,7 +230,7 @@ function Row({ job, onOpen }: { job: Job; onOpen: () => void }) {
             <code className="font-mono text-xs text-ink-muted">{job.video_id}</code>
             {job.video_url && (
               <a
-                className="text-xs text-cue-progress hover:underline"
+                className="text-xs text-link hover:underline"
                 href={job.video_url}
                 target="_blank"
                 rel="noreferrer noopener"

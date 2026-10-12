@@ -32,7 +32,10 @@ import type {
   OutboxRow,
   PolicyDetail,
   PolicyStatus,
+  ReportPreview,
+  DailySummary,
   Settings,
+  SettingsUpdate,
   SheetsConfig,
   SheetsHealth,
   SheetsLimits,
@@ -69,6 +72,21 @@ function useInvalidateJobs() {
     void client.invalidateQueries({ queryKey: ["job"] });
     void client.invalidateQueries({ queryKey: ["dashboard"] });
   };
+}
+
+/**
+ * Invalidate the connection list.
+ *
+ * Every connection mutation changes something an operator reads *from that list* —
+ * its status, its channel identities, whether it can still be disabled. Without this
+ * the list keeps its stale copy, and the button they just pressed keeps offering the
+ * action it has already performed. That reads as "nothing happened", which is exactly
+ * how an operator ends up clicking again at a moment when a different action is now
+ * the available one.
+ */
+function useInvalidateConnections() {
+  const client = useQueryClient();
+  return () => void client.invalidateQueries({ queryKey: keys.connections });
 }
 
 // ----------------------------------------------------------------------
@@ -123,6 +141,62 @@ export function useWorkerStatus() {
     queryKey: keys.worker,
     queryFn: () => api.get<WorkerStatus>("/api/worker/status"),
     refetchInterval: 3000,
+  });
+}
+
+/**
+ * The only writable runtime settings.
+ *
+ * These five are process-lifetime values the worker reads at startup, so the response
+ * is authoritative rather than optimistic — the form re-reads after a save instead of
+ * assuming the change took effect, because "saved" and "applied" are different facts
+ * here and conflating them is how an operator ends up wondering why the lead time did
+ * not move.
+ */
+export function useUpdateSettings() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (patch: SettingsUpdate) => api.put<Settings>("/api/settings", patch),
+    onSuccess: (data) => void client.setQueryData(keys.settings, data),
+  });
+}
+
+/** Which jobs point at a given media row — needed before anything can be deleted. */
+export function useMediaJobs(mediaId: number | null) {
+  return useQuery({
+    queryKey: ["media", "jobs", mediaId ?? 0],
+    queryFn: () => api.get<JobList>(`/api/media/${mediaId}/jobs`),
+    enabled: mediaId !== null && mediaId > 0,
+  });
+}
+
+export function useRecheckMedia() {
+  const invalidate = useInvalidateJobs();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.post<MediaCheck>(`/api/media/${id}/recheck`),
+    onSuccess: () => {
+      void invalidate();
+      void client.invalidateQueries({ queryKey: keys.media });
+    },
+  });
+}
+
+/**
+ * Deleting media is refused by the backend while any job still points at it, and this
+ * hook surfaces that refusal rather than hiding it: the caller must first ask
+ * `useMediaJobs`, show the operator what would be affected, and only then attempt the
+ * delete.
+ */
+export function useDeleteMedia() {
+  const invalidate = useInvalidateJobs();
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.del<void>(`/api/media/${id}`),
+    onSuccess: () => {
+      void invalidate();
+      void client.invalidateQueries({ queryKey: keys.media });
+    },
   });
 }
 
@@ -273,43 +347,61 @@ export function useDeleteJob() {
 }
 
 export function useAuthorizeConnection() {
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (id: number) => api.post<AuthorizeResult>(`/api/connections/${id}/authorize`),
+    onSuccess: () => refresh(),
   });
 }
 
 export function useAttachTestCredential() {
   const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (id: number) => api.post<Connection>(`/api/connections/${id}/attach-test-credential`),
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
   });
 }
 
 export function useRevokeConnection() {
   const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (id: number) => api.post<Connection>(`/api/connections/${id}/revoke`),
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
   });
 }
 
 export function useRefreshIdentities() {
   const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (id: number) => api.post<Connection>(`/api/connections/${id}/refresh-identities`),
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
   });
 }
 
 export function useConfirmChannel() {
   const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (identityId: number) =>
       api.post<never>(`/api/connections/channels/${identityId}/confirm`, {
         channel_identity_id: identityId,
       }),
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
   });
 }
 
@@ -373,28 +465,40 @@ export function useDiagnostic(connectionId: number | null) {
  */
 export function useDisableConnection() {
   const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (id: number) =>
       api.post<ConnectionAction>(`/api/compliance/connections/${id}/disable`),
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
   });
 }
 
 export function useEnableConnection() {
   const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (id: number) =>
       api.post<ConnectionAction>(`/api/compliance/connections/${id}/enable`),
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
   });
 }
 
 export function useRevokeConnectionAction() {
   const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
   return useMutation({
     mutationFn: (id: number) =>
       api.post<ConnectionAction>(`/api/compliance/connections/${id}/revoke`),
-    onSuccess: () => void invalidate(),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
   });
 }
 
@@ -426,11 +530,20 @@ export function useSheetsHealth() {
   });
 }
 
-export function useSheetsOutbox() {
+/**
+ * Rows Hexton still owes the spreadsheet.
+ *
+ * `enabled` exists because `GET /api/reporting/outbox` is behind the privacy-policy
+ * gate: before acceptance a request would be refused with a 403, and showing "no rows"
+ * for what is really "reporting is not switched on yet" would be exactly the kind of
+ * quiet conflation this application is supposed to avoid.
+ */
+export function useSheetsOutbox(enabled = true) {
   return useQuery({
     queryKey: reportingKeys.outbox,
     queryFn: () => api.get<{ rows: OutboxRow[]; total: number }>("/api/reporting/outbox"),
     staleTime: 2_000,
+    enabled,
   });
 }
 
@@ -487,6 +600,45 @@ export function useRetryOutboxRecord() {
   const refresh = useReportingRefresh();
   return useMutation({
     mutationFn: (recordId: number) => api.post<SheetsOperation>(`/api/reporting/outbox/${recordId}/retry`),
+    onSuccess: refresh,
+  });
+}
+
+/**
+ * The exact row one job would produce, read on demand.
+ *
+ * Shown before anything is written so an operator can see the claim — in particular
+ * whether the row would say "Published" — before a single append reaches the sheet.
+ */
+export function useReportPreview(jobId: number | null) {
+  return useQuery({
+    queryKey: ["reporting", "preview", jobId ?? 0],
+    queryFn: () => api.get<ReportPreview>(`/api/reporting/preview/${jobId}`),
+    enabled: jobId !== null && jobId > 0,
+    staleTime: 0,
+  });
+}
+
+/** The daily completion summary for one report date (`YYYY-MM-DD`). */
+export function useDailySummary(reportDate: string | null) {
+  return useQuery({
+    queryKey: ["reporting", "daily", reportDate ?? ""],
+    queryFn: () => api.get<DailySummary>(`/api/reporting/daily-summary/${reportDate}`),
+    enabled: reportDate !== null && /^\d{4}-\d{2}-\d{2}$/.test(reportDate),
+  });
+}
+
+/**
+ * Materialise pending report records into the outbox.
+ *
+ * This only writes to the local outbox. It never touches YouTube and never starts an
+ * upload — `enqueue_reports` is a reporting-side operation, and the separation is what
+ * makes it safe to expose as a button.
+ */
+export function useEnqueueReports() {
+  const refresh = useReportingRefresh();
+  return useMutation({
+    mutationFn: () => api.post<SheetsOperation>("/api/reporting/enqueue"),
     onSuccess: refresh,
   });
 }

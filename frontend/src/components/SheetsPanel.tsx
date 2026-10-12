@@ -401,9 +401,14 @@ function Outbox({ rows }: { rows: OutboxRow[] }) {
         cannot duplicate a row that actually landed.
       </p>
       <table className="mt-2 w-full text-left text-xs">
+        <caption className="sr-only">
+          Every report row Hexton still owes the spreadsheet, with the Sync Key that
+          makes the write idempotent and the Schedule ID it belongs to.
+        </caption>
         <thead className="text-ink-faint">
           <tr>
-            <th className="py-1 pr-3 font-normal">Key</th>
+            <th className="py-1 pr-3 font-normal">Sync Key</th>
+            <th className="py-1 pr-3 font-normal">Schedule ID</th>
             <th className="py-1 pr-3 font-normal">Kind</th>
             <th className="py-1 pr-3 font-normal">Status</th>
             <th className="py-1 pr-3 font-normal">Attempts</th>
@@ -414,6 +419,7 @@ function Outbox({ rows }: { rows: OutboxRow[] }) {
           {rows.map((row) => (
             <tr key={row.id} className="border-t border-edge/60 align-top">
               <td className="py-1.5 pr-3 font-mono text-[11px]">{row.sync_key}</td>
+              <td className="py-1.5 pr-3 font-mono text-[11px]">{row.schedule_id ?? "—"}</td>
               <td className="py-1.5 pr-3">{row.kind === "daily_summary" ? "Summary" : "Upload"}</td>
               <td className={`py-1.5 pr-3 ${row.status === "failed" ? "text-cue-attention" : ""}`}>
                 {row.status}
@@ -427,7 +433,7 @@ function Outbox({ rows }: { rows: OutboxRow[] }) {
                     disabled={retry.isPending}
                     onClick={() => retry.mutate(row.id)}
                   >
-                    Re-queue
+                    Retry this row
                   </button>
                 )}
               </td>

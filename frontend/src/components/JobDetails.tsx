@@ -1,8 +1,25 @@
+import { Link } from "react-router-dom";
 import type { Job, JobEvent, Observation } from "../api/types";
 import { useJob, useJobDetailActions } from "../hooks/jobActions";
+import { usePolicyStatus, useSheetsOutbox } from "../hooks/api";
 import { MentionPanel } from "./MentionPanel";
 import { ProgressBar, StatusBadge } from "./StatusBadge";
 import { MENTION_NAMES, REMOTE_NAMES, formatBytes, formatDuration, formatWhen } from "../lib/state";
+
+/**
+ * States whose *content* an operator may still edit. Mirrors the backend's
+ * `EDITABLE_STATES` rather than guessing: once bytes have left for YouTube, the title
+ * and description are no longer the whole truth about the remote video, so the panel
+ * offers no Edit button that would only be refused with a 409.
+ */
+const EDITABLE_STATES: Job["state"][] = [
+  "JOB-DRAFT",
+  "JOB-READY",
+  "JOB-QUEUED",
+  "JOB-FAILED_RETRY",
+  "JOB-BLOCKED",
+  "JOB-MISSED_WINDOW",
+];
 
 /**
  * The job details panel.
@@ -13,10 +30,16 @@ import { MENTION_NAMES, REMOTE_NAMES, formatBytes, formatDuration, formatWhen } 
  * able to answer "why is this job stuck?" without reading a log file — and it is why
  * an uncertain upload says *outcome uncertain* in as many places as it can, since
  * retrying one of those can create a duplicate video.
+ *
+ * The three times are kept apart on purpose: when the bytes finished transferring
+ * locally, when the video is *intended* to publish, and when YouTube was actually
+ * observed to have made it public. Collapsing any two of them is how an operator ends
+ * up believing a video is live.
  */
 export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => void }) {
   const detail = useJob(jobId);
   const actions = useJobDetailActions(jobId);
+  const reporting = useReportingState();
 
   if (detail.isLoading) {
     return (
@@ -39,6 +62,14 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
   const { job, events, observations, upload_sessions, allowed_transitions } = detail.data;
   const active = job.state === "JOB-UPLOADING";
 
+  // The moment YouTube was first observed to have the video public. Derived from the
+  // observation log — the backend's record of what YouTube said — never from an
+  // upload response.
+  const publicObservation = observations.find((o) => o.remote_state === "remote.public");
+  const verifiedPublicAt = publicObservation
+    ? (publicObservation.publish_at ?? publicObservation.observed_at)
+    : null;
+
   return (
     <aside className="card flex flex-col overflow-hidden" aria-label="Job details">
       <div className="flex items-start justify-between gap-4 border-b border-edge px-5 py-4">
@@ -48,9 +79,16 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
             {job.public_id} · {allowed_transitions.length} legal next states
           </p>
         </div>
-        <button className="btn" onClick={onClose}>
-          Close
-        </button>
+        <div className="flex shrink-0 gap-2">
+          {EDITABLE_STATES.includes(job.state) && (
+            <Link className="btn" to={`/edit/${job.id}`}>
+              Edit
+            </Link>
+          )}
+          <button className="btn" onClick={onClose}>
+            Close
+          </button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-5 overflow-y-auto px-5 py-4">
@@ -61,14 +99,41 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
 
         <Facts
           facts={[
+            ["Schedule ID", job.public_id],
             ["Target channel", job.channel_title ?? "Not selected"],
             ["Channel ID", job.channel_id ?? "—"],
             ["Visibility sent", job.privacy],
-            ["Intended publication", `${formatWhen(job.publish_at_utc)} (${job.publish_at_display ?? "—"})`],
-            ["Actual upload completed", formatWhen(job.uploaded_at)],
-            ["Most recent remote state", `${REMOTE_NAMES[job.remote_state]}${job.remote_privacy_status ? ` · ${job.remote_privacy_status}` : ""}`],
+            [
+              "Local upload completed",
+              job.uploaded_at
+                ? `${formatWhen(job.uploaded_at)} (${job.uploaded_at_display ?? "—"})`
+                : "Not uploaded",
+            ],
+            [
+              "Intended YouTube publication",
+              `${formatWhen(job.publish_at_utc)} (${job.publish_at_display ?? "—"})`,
+            ],
+            [
+              "Verified public publication",
+              verifiedPublicAt ? formatWhen(verifiedPublicAt) : "Not yet verified",
+            ],
+            [
+              "Most recent remote state",
+              `${REMOTE_NAMES[job.remote_state]}${job.remote_privacy_status ? ` · ${job.remote_privacy_status}` : ""}`,
+            ],
             ["Last verified", formatWhen(job.last_polled_at)],
             ["Publication verification", job.poll_result ?? "Never polled"],
+            [
+              "Google Sheets reporting",
+              reporting.forSchedule(job.public_id),
+            ],
+            ["Error classification", job.failure_kind ?? "—"],
+            [
+              "Next retry",
+              job.next_attempt_at
+                ? `${formatWhen(job.next_attempt_at)} (attempt ${job.attempt + 1} of ${job.max_attempts})`
+                : "—",
+            ],
             ["Source clip", `${job.media_name} · ${formatBytes(job.media_size_bytes)}${job.media_duration_seconds !== null ? ` · ${formatDuration(job.media_duration_seconds)}` : ""}`],
             ["Container", job.media_container ?? "—"],
             ["Tags", job.tags.length ? job.tags.join(", ") : "—"],
@@ -225,10 +290,28 @@ function Actions({ job, actions }: { job: Job; actions: ReturnType<typeof useJob
         )}
       </div>
       {job.state === "JOB-NEEDS_REVIEW" && (
-        <p className="mt-2 text-xs text-cue-attention">
-          The outcome of the last upload could not be proven. Hexton will not retry it
-          automatically, because a second attempt could create a duplicate video.
-        </p>
+        <div className="mt-2 rounded-md border border-cue-attention/50 bg-cue-attention/10 px-3 py-2 text-xs text-cue-attention">
+          <p className="font-medium">
+            The outcome of the last upload could not be proven. Hexton will not retry it
+            automatically, because a second attempt could create a duplicate video.
+          </p>
+          <ol className="mt-2 list-decimal space-y-1 pl-4">
+            <li>
+              Open YouTube Studio and search for a video with this title uploaded in the
+              last hour.
+            </li>
+            <li>
+              Found it? Copy its ID and press{" "}
+              <span className="font-medium">This video is mine</span> — Hexton records the
+              ID and carries on verifying it.
+            </li>
+            <li>
+              Not there? Press{" "}
+              <span className="font-medium">None of these are mine</span>; only then will
+              a fresh upload be allowed.
+            </li>
+          </ol>
+        </div>
       )}
       {terminal && <p className="mt-2 text-xs text-ink-faint">This job is finished.</p>}
     </section>
@@ -289,4 +372,31 @@ function EventLog({ events }: { events: JobEvent[] }) {
       </ol>
     </section>
   );
+}
+
+/**
+ * What Google Sheets reporting currently says about one schedule.
+ *
+ * Three distinct answers, deliberately not collapsed: reporting is switched off (the
+ * policy has not been accepted, so the outbox is not even readable), no row is owed
+ * yet (the upload has not reached the point where a report record exists), or here is
+ * the row and its delivery status. Showing "not reported" for the first case would
+ * tell an operator their report went missing when nothing was ever attempted.
+ */
+function useReportingState() {
+  const policy = usePolicyStatus();
+  const accepted = policy.data?.accepted ?? false;
+  const outbox = useSheetsOutbox(accepted);
+
+  return {
+    forSchedule(scheduleId: string): string {
+      if (!accepted) return "Locked — privacy policy not accepted";
+      if (outbox.isLoading) return "Reading…";
+      if (outbox.error) return "Unavailable";
+      const row = outbox.data?.rows.find((candidate) => candidate.schedule_id === scheduleId);
+      if (!row) return "No report row owed";
+      const attempts = row.attempts > 0 ? ` · ${row.attempts} attempt${row.attempts === 1 ? "" : "s"}` : "";
+      return `${row.status}${attempts}${row.last_error ? ` — ${row.last_error}` : ""}`;
+    },
+  };
 }

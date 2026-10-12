@@ -22,6 +22,14 @@ dist/
 .vite/
 *.tsbuildinfo
 
+# --- End-to-end fixtures and artifacts ---
+# A throwaway database seeded before each Playwright run, plus the run's own output.
+# Neither belongs in the repository: the fixtures exist to be rebuilt, not reviewed.
+.e2e-data/
+test-results/
+playwright-report/
+blob-report/
+
 # --- Secrets and local state (never committed) ---
 .env
 .env.*

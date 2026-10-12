@@ -3,7 +3,14 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import { App } from "./App";
+import { initTheme } from "./lib/theme";
 import "./index.css";
+
+/**
+ * Resolve the theme before React renders anything, so the first painted frame is
+ * already the operator's chosen appearance rather than one frame of the other.
+ */
+initTheme();
 
 /**
  * Entry point.

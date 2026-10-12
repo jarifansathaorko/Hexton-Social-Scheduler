@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ApiError } from "../api/client";
 import type { JobInput, Media, ValidateResult } from "../api/types";
+import { MENTION_NAMES } from "../lib/state";
 import {
   useCheckMedia,
   useConnections,
   useCreateJob,
   useJob,
   useMedia,
+  useMention,
   useSettings,
   useUpdateJob,
   useValidateJob,
@@ -34,8 +36,12 @@ const CATEGORIES: [string, string][] = [
  */
 export function EditorPage() {
   const params = useParams();
+  const [search] = useSearchParams();
   const navigate = useNavigate();
   const jobId = params.jobId ? Number(params.jobId) : null;
+  // A clip chosen in the Media Library arrives as `?media=<id>` rather than as a
+  // second route, so the editor stays the single place a job is created.
+  const mediaParam = Number(search.get("media") ?? 0);
 
   const existing = useJob(jobId);
   const media = useMedia();
@@ -74,8 +80,9 @@ export function EditorPage() {
       });
       setPath(job.media_path);
     } else if (!jobId && media.data) {
+      const preselected = media.data.find((m) => m.id === mediaParam) ?? null;
       setForm({
-        media_id: 0,
+        media_id: preselected?.id ?? 0,
         title: "",
         description: "",
         tags: [],
@@ -90,8 +97,9 @@ export function EditorPage() {
         mention_requested: false,
         consent_transforms: false,
       });
+      if (preselected) setPath(preselected.path);
     }
-  }, [jobId, existing.data, media.data, settings.data, form]);
+  }, [jobId, existing.data, media.data, settings.data, form, mediaParam]);
 
   // Live validation. Debounced so typing does not fire a request per keystroke.
   useEffect(() => {
@@ -137,10 +145,10 @@ export function EditorPage() {
     try {
       if (jobId) {
         await updateJob.mutateAsync(form);
-        navigate(`/content?job=${jobId}`);
+        navigate(`/calendar?job=${jobId}`);
       } else {
         const created = await createJob.mutateAsync({ input: form, queue });
-        navigate(queue ? "/queue" : `/content?job=${created.id}`);
+        navigate(queue ? "/queue" : `/calendar?job=${created.id}`);
       }
     } catch (exc) {
       setError(exc instanceof ApiError ? exc.message : "The job could not be saved.");
@@ -423,6 +431,8 @@ export function EditorPage() {
                   confirm that you added it in YouTube Studio.
                 </span>
               </label>
+
+              {jobId !== null && form.mention_requested && <MentionStateNote jobId={jobId} />}
             </div>
           </section>
         </div>
@@ -467,17 +477,39 @@ export function EditorPage() {
                   }
                 >
                   <option value="">None selected</option>
-                  {channels.map((ch) => (
-                    <option key={ch.id} value={ch.id}>
-                      {ch.title} {ch.handle ? `(${ch.handle})` : ""}
-                      {ch.operator_confirmed_at ? " ✓" : ""}
-                    </option>
-                  ))}
+                  {channels
+                    .filter((ch) => ch.operator_confirmed_at !== null)
+                    .map((ch) => (
+                      <option key={ch.id} value={ch.id}>
+                        {ch.title} {ch.handle ? `(${ch.handle})` : ""}
+                      </option>
+                    ))}
+                  {channels.some((ch) => ch.operator_confirmed_at === null) && (
+                    <optgroup label="Not confirmed — cannot be selected">
+                      {channels
+                        .filter((ch) => ch.operator_confirmed_at === null)
+                        .map((ch) => (
+                          <option key={ch.id} value={ch.id} disabled>
+                            {ch.title} {ch.handle ? `(${ch.handle})` : ""} — unconfirmed
+                          </option>
+                        ))}
+                    </optgroup>
+                  )}
                 </select>
                 {channels.length === 0 && form.connection_id && (
                   <p className="mt-1 text-xs text-cue-attention">
-                    No verified channel on this connection yet. Refresh identities from
-                    Settings.
+                    No channel identity has been resolved on this connection yet. Open{" "}
+                    <a className="underline" href="/channels">
+                      YouTube Channels
+                    </a>{" "}
+                    and use “Refresh identities”.
+                  </p>
+                )}
+                {channels.length > 0 && (
+                  <p className="mt-1 text-xs text-ink-faint">
+                    Only identities you have confirmed are selectable. A label appearing in
+                    a list is not proof the connection can publish to it — confirm the
+                    identity first, and see the brand-account note on the Channels page.
                   </p>
                 )}
               </div>
@@ -535,3 +567,43 @@ export function EditorPage() {
 }
 
 export type { Media };
+
+/**
+ * The mention identity and where it stands, shown inside the editor rather than only
+ * in the details panel — because the mention checkbox and the state it produces are
+ * two halves of the same decision.
+ *
+ * `label` is the backend's own operator-facing sentence (`MENTION_DISPLAY_MAP`) and is
+ * the only mention text rendered here. `attestation_only` is never dropped: "verified"
+ * on this application always means *a person said so*, since `DF-19` records that the
+ * `videos` resource has no mention entity for any API to check.
+ */
+function MentionStateNote({ jobId }: { jobId: number }) {
+  const mention = useMention(jobId);
+  if (mention.isLoading) return null;
+  if (!mention.data) return null;
+  const view = mention.data;
+  if (!view.requested) return null;
+
+  return (
+    <div className="rounded-md border border-edge bg-canvas p-3">
+      <div className="text-xs font-medium uppercase tracking-wide text-ink-faint">
+        Mention state
+      </div>
+      <p className="mt-1 text-sm text-ink">{view.label}</p>
+      {view.handles.length > 0 && (
+        <p className="mt-1 text-xs text-ink-muted">
+          {view.handles.map((handle) => `@${handle}`).join(", ")}
+        </p>
+      )}
+      <p className="mt-1 text-xs text-ink-faint">{view.reason}</p>
+      {view.rewrite_warning && (
+        <p className="mt-2 text-xs text-cue-attention">{view.rewrite_warning}</p>
+      )}
+      <p className="mt-2 text-xs text-ink-faint">
+        Current chip: {MENTION_NAMES[view.state]}
+        {view.attestation_only && " · operator attestation, never an API verification"}
+      </p>
+    </div>
+  );
+}
