@@ -28,13 +28,23 @@ from hexton.connectors.base import ConnectorError
 from hexton.db import events as ev
 from hexton.db.models import ScheduledJob
 from hexton.domain.jobstate import FailureKind, JobState, PollResult
-from hexton.worker.runner import _record_observation, canonical_url, remote_state_of
+from hexton.worker.runner import (
+    AuthorizationUnavailable,
+    _record_observation,
+    canonical_url,
+    remote_state_of,
+    resolve_access_token,
+)
 
 log = logging.getLogger(__name__)
 
 #: States the sweep will look at. ``UPLOADED`` covers a job with no publication time
 #: whose visibility still needs confirming.
 SWEEPABLE = (JobState.SCHEDULED.value, JobState.UPLOADED.value)
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z") if value else None
 
 
 #: Poll pacing by how long ago publication was due.
@@ -56,6 +66,12 @@ def poll_delay(elapsed: timedelta) -> timedelta:
 #: Hard ceiling on consecutive polls for one job. Past this the sweep stops spending
 #: quota and leaves the job *awaiting verification*, which is the honest state.
 MAX_POLLS_PER_JOB = 200
+
+#: How far out a job is pushed once it stops polling.
+#:
+#: Far enough that no realistic worker uptime reaches it, so the job leaves the due set
+#: permanently while staying a live row an operator can inspect and re-poll by hand.
+POLL_CEILING_PARK = timedelta(days=365 * 100)
 
 
 @dataclass(frozen=True)
@@ -141,7 +157,7 @@ class PublishConfirmationSweep:
             )
             return "quota_deferred"
 
-        access = self._token(job, now)
+        access = self._token(session, job, now)
         if access is None:
             # The PC may have been asleep at publication time, or the consent screen's
             # seven-day window may have lapsed. Either way the video is still on
@@ -259,38 +275,51 @@ class PublishConfirmationSweep:
         """Choose the next poll time, and stop at the documented ceiling."""
         polls = len([o for o in job.observations if not o.inconclusive])
         if polls >= MAX_POLLS_PER_JOB:
-            job.next_poll_at = None
+            # ``next_poll_at IS NULL`` means "never scheduled a poll", which the sweep's
+            # due-query treats as due *now*. Leaving it NULL at the ceiling therefore
+            # polled a capped job on every single tick — the ceiling existed to protect
+            # the daily quota and instead guaranteed this job was the first thing
+            # consumed by it, for ever. Parking it past any plausible run keeps the job
+            # legible, keeps it out of the due set, and leaves it checkable by hand.
+            job.next_poll_at = now + POLL_CEILING_PARK
             ev.record_event(
                 session,
                 job_id=job.id,
                 kind=ev.KIND_VERIFICATION_PENDING,
                 message=f"Stopped polling after {polls} observations to stay within "
                 f"the quota. The job remains *publication awaiting verification* and "
-                f"can be checked by hand.",
-                payload={"polls": polls},
+                f"can be checked by hand; it is parked rather than left due, so it no "
+                f"longer consumes quota on every sweep.",
+                payload={"polls": polls, "parked_until": _iso(job.next_poll_at)},
             )
             return
         elapsed = _elapsed(publish_at, now)
         job.next_poll_at = now + poll_delay(elapsed)
 
-    def _token(self, job: ScheduledJob, now: datetime) -> str | None:
+    def _token(self, session: Session, job: ScheduledJob, now: datetime) -> str | None:
+        """A usable access token for ``job``, or ``None`` when no usable grant exists.
+
+        Delegates to :func:`~hexton.worker.runner.resolve_access_token` (F-22). This
+        used to be a second, shorter implementation of the same rule: it returned
+        whatever access-token string was stored without ever consulting
+        ``token_expires_at``, so a verification that outlived the one-hour token kept
+        polling with a dead credential and could never recover on its own; and it
+        swallowed a refused refresh instead of stamping ``last_token_check_*`` and
+        starting ``DF-21``'s 30-calendar-day deletion clock — the one path that
+        actually *discovers* a grant has died never recorded that it had.
+        """
         if job.connection is None:
             return None
-        key = f"conn:{job.connection.public_id}"
-        access = self.ctx.credentials.read(f"{key}:access")
-        if access:
-            return access
-        refresh = self.ctx.credentials.read(f"{key}:refresh")
-        if not refresh:
-            return None
         try:
-            tokens = self.ctx.connector.refresh(refresh)
-        except ConnectorError:
+            return resolve_access_token(
+                self.ctx.credentials,
+                self.ctx.connector,
+                session,
+                job.connection,
+                now,
+            )
+        except AuthorizationUnavailable:
             return None
-        self.ctx.credentials.write(f"{key}:access", tokens.access_token)
-        if tokens.refresh_token and tokens.refresh_token != refresh:
-            self.ctx.credentials.write(f"{key}:refresh", tokens.refresh_token)
-        return tokens.access_token
 
     def _to(self, session: Session, job: ScheduledJob, target: JobState, now: datetime) -> None:
         from hexton.domain.jobstate import can_transition

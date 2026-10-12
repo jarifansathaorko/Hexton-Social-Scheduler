@@ -59,8 +59,25 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
     );
   }
 
-  const { job, events, observations, upload_sessions, allowed_transitions } = detail.data;
+  const {
+    job,
+    events,
+    observations,
+    upload_sessions,
+    allowed_transitions,
+    candidates,
+    can_requeue,
+  } = detail.data;
   const active = job.state === "JOB-UPLOADING";
+
+  /**
+   * Every video ID this job may legitimately claim, most-likely-first: the ID the job
+   * itself holds (when it holds one), then whatever the ladder found. Deduplicated so
+   * the same ID never appears twice as two separate "mine" decisions.
+   */
+  const adoptable = Array.from(
+    new Set([job.video_id, ...candidates].filter((v): v is string => Boolean(v))),
+  );
 
   // The moment YouTube was first observed to have the video public. Derived from the
   // observation log — the backend's record of what YouTube said — never from an
@@ -184,7 +201,7 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
           </section>
         )}
 
-        <Actions job={job} actions={actions} />
+        <Actions job={job} actions={actions} adoptable={adoptable} can_requeue={can_requeue} />
 
         {upload_sessions.length > 0 && (
           <section>
@@ -212,7 +229,19 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
   );
 }
 
-function Actions({ job, actions }: { job: Job; actions: ReturnType<typeof useJobDetailActions> }) {
+function Actions({
+  job,
+  actions,
+  adoptable,
+  can_requeue,
+}: {
+  job: Job;
+  actions: ReturnType<typeof useJobDetailActions>;
+  /** Video IDs this job may legitimately claim, most-likely-first (F-04). */
+  adoptable: string[];
+  /** Whether re-running the job is a meaningful remaining action (F-04). */
+  can_requeue: boolean;
+}) {
   const terminal = job.state === "JOB-PUBLISHED" || job.state === "JOB-CANCELLED";
   return (
     <section>
@@ -261,22 +290,73 @@ function Actions({ job, actions }: { job: Job; actions: ReturnType<typeof useJob
         )}
         {(job.state === "JOB-NEEDS_REVIEW" || job.insert_may_have_succeeded) && (
           <>
-            {job.video_id && (
+            {/*
+              The candidates come from the backend's reconciliation ladder, not from
+              `job.video_id`. When a `videos.insert` outcome is unknown the job's own
+              `video_id` is exactly the thing that is missing, so a panel that only
+              offered "This video is mine" against a value that is null in the
+              ambiguous case offered nothing at all (F-04).
+            */}
+            {adoptable.map((candidate) => (
+              <button
+                key={candidate}
+                className="btn"
+                disabled={actions.reconcile.isPending}
+                onClick={() =>
+                  actions.reconcile.mutate({
+                    id: job.id,
+                    body: { video_id: candidate, resolution: "adopt" },
+                  })
+                }
+              >
+                This video is mine <span className="font-mono text-[11px]">{candidate}</span>
+              </button>
+            ))}
+            {adoptable.length === 0 && job.video_id && (
               <button
                 className="btn"
                 disabled={actions.reconcile.isPending}
-                onClick={() => actions.reconcile.mutate({ id: job.id, body: { video_id: job.video_id } })}
+                onClick={() =>
+                  actions.reconcile.mutate({
+                    id: job.id,
+                    body: { video_id: job.video_id, resolution: "adopt" },
+                  })
+                }
               >
                 This video is mine
               </button>
             )}
+            {/*
+              Two honest answers, not one. "None of these are mine" used to be the only
+              rejection there was, and it always meant *cancel* — so an operator who had
+              checked YouTube, found no upload, and wanted the job to run again had no
+              button at all and the schedule was permanently stranded (F-04). Cancelling
+              stays: rejecting a candidate and killing the schedule are different
+              decisions and only the operator knows which one they meant.
+            */}
             <button
               className="btn"
               disabled={actions.reconcile.isPending}
-              onClick={() => actions.reconcile.mutate({ id: job.id, body: { video_id: null } })}
+              onClick={() =>
+                actions.reconcile.mutate({ id: job.id, body: { resolution: "cancel" } })
+              }
             >
-              None of these are mine
+              None of these are mine — cancel
             </button>
+            {can_requeue && (
+              <button
+                className="btn"
+                disabled={actions.reconcile.isPending}
+                onClick={() =>
+                  actions.reconcile.mutate({
+                    id: job.id,
+                    body: { resolution: "not_uploaded" },
+                  })
+                }
+              >
+                None of these are mine — run it again
+              </button>
+            )}
           </>
         )}
         {(job.state === "JOB-DRAFT" || job.state === "JOB-CANCELLED") && (
@@ -301,14 +381,27 @@ function Actions({ job, actions }: { job: Job; actions: ReturnType<typeof useJob
               last hour.
             </li>
             <li>
-              Found it? Copy its ID and press{" "}
-              <span className="font-medium">This video is mine</span> — Hexton records the
-              ID and carries on verifying it.
+              Found it? Press{" "}
+              <span className="font-medium">This video is mine</span> next to the matching
+              ID
+              {adoptable.length
+                ? " — Hexton already listed every candidate video it found for this job."
+                : " — Hexton records the ID you confirm."}{" "}
+              This is a decision a person made, not a check Hexton can make for you (DF-08).
             </li>
             <li>
               Not there? Press{" "}
-              <span className="font-medium">None of these are mine</span>; only then will
-              a fresh upload be allowed.
+              <span className="font-medium">None of these are mine</span> — either to
+              cancel the job, or{" "}
+              {can_requeue ? (
+                <>
+                  to <span className="font-medium">run it again</span> once you have
+                  confirmed no upload exists
+                </>
+              ) : (
+                "to run it again"
+              )}
+              . Nothing restarts on its own either way.
             </li>
           </ol>
         </div>

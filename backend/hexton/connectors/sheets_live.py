@@ -22,12 +22,54 @@ from typing import Any
 from .sheets import KEY_COLUMN, SheetDestination, SheetError, SheetWrite
 
 
+def _as_google_credentials(value: Any) -> Any:
+    """Coerce what the credential store hands us into what the Google client wants.
+
+    ``_connector_for`` reads an *access token string* out of the store — that is the
+    only thing the store holds — and the application has never constructed a
+    ``google.auth`` credential anywhere. ``build(credentials=...)`` calls
+    ``credentials.authorize(...)`` on whatever it is given, so passing the string
+    straight through failed with ``'str' object has no attribute 'authorize'`` at the
+    first Sheets call: reporting could never have worked against a real spreadsheet,
+    and the failure surfaced as an unhandled ``AttributeError`` rather than as a
+    report error with a kind.
+
+    A token-only credential deliberately has **no** refresh machinery: there is no
+    client secret in this application by design, and the store is refreshed by
+    :func:`hexton.services.sheets._connector_for` before each call. When the token
+    ages out mid-session the library raises, ``_error_kind`` maps it to ``"expired"``,
+    and the next call re-reads a fresh token from the store.
+    """
+    if value is None:
+        raise SheetError(
+            "expired",
+            "no credential was supplied for the Sheets connection; the stored token "
+            "was read as empty.",
+        )
+    if isinstance(value, str):
+        try:
+            from google.oauth2.credentials import Credentials
+        except ImportError as exc:  # pragma: no cover - depends on the install
+            raise SheetError(
+                "network",
+                "google-auth is not installed; run `pip install -e '.[google]'` in backend/.",
+            ) from exc
+        return Credentials(token=value)
+    return value
+
+
 def _error_kind(exc: Exception) -> str:
     """Map a Google ``HttpError`` onto this application's error vocabulary.
 
-    The status-code mapping is the only place a Google error is interpreted. ``403`` is
-    split because Sheets uses it for both "this identity may not" and "the sharing is
-    off", and the operator-facing message differs sharply between the two.
+    The status-code mapping is the only place a Google error is interpreted. ``403``
+    used to be split on response text — "has not granted" / "insufficient permission"
+    versus everything else — with a comment promising that "the operator-facing message
+    differs sharply between the two". Both arms returned ``"forbidden"``, and
+    :func:`hexton.services.sheets._explain_sheet_error` writes one sentence that already
+    covers both halves ("share the spreadsheet with that account, or connect an account
+    that owns it"). A branch that cannot change the outcome is not a distinction, and
+    the text match it rested on was never reliable anyway: Google does not promise that
+    wording.
     """
     status = getattr(exc, "status_code", None) or getattr(
         getattr(exc, "resp", None), "status", None
@@ -38,13 +80,6 @@ def _error_kind(exc: Exception) -> str:
     if status in (401,):
         return "expired"
     if status == 403:
-        reason = str(exc).lower()
-        if (
-            "has not granted" in reason
-            or "insufficient permission" in reason
-            or "access not configured" in reason
-        ):
-            return "forbidden"
         return "forbidden"
     if status == 404:
         return "not_found"
@@ -57,7 +92,7 @@ class LiveSheetsConnector:
     """A ``SheetConnector`` backed by the official Google Sheets API client."""
 
     def __init__(self, credentials: Any) -> None:
-        self._credentials = credentials
+        self._credentials = _as_google_credentials(credentials)
         self._service: Any | None = None
 
     def _build(self) -> Any:

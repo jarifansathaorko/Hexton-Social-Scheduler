@@ -155,7 +155,19 @@ class MetadataConsent:
 
 
 def may_transform(consent: MetadataConsent, field_name: str) -> bool:
-    """Whether ``field_name`` may be modified. Anything not named is refused."""
+    """Whether ``field_name`` may be modified. Anything not named is refused.
+
+    **Reachability, recorded because it looks like dead code and is not (F-18).**
+    ``MetadataConsent`` is never constructed in a production path and this function is
+    called only from ``test_compliance`` — the live transform path
+    (:func:`hexton.domain.validation.apply_transforms`) takes a plain ``consent``
+    boolean, because it is handed only a description and a list of hashtags. So
+    ``privacyStatus``, ``publishAt`` and ``tags`` are unreachable from any transform
+    regardless of what this function would answer: there is no code path that hands
+    those fields to a transform at all. The guard below and :data:`NEVER_TRANSFORM_FIELDS`
+    are therefore a second, independent layer rather than the only one — do not delete
+    either on the grounds that nothing calls them.
+    """
     if field_name == "title":
         return consent.transform_titles
     if field_name == "description":

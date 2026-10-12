@@ -63,7 +63,17 @@ class Settings(BaseSettings):
 
     # --- session security --------------------------------------------------
     #: 32 bytes of entropy, hex. Generated and persisted on first run into
-    #: ``data_dir/session.key`` with user-only ACLs; never committed.
+    #: ``data_dir/session.key``; never committed.
+    #:
+    #: How that file is protected is worth being exact about (``F-25``).
+    #: ``os.chmod(..., 0o600)`` is called when the key is written, but on Windows the
+    #: C runtime honours only the *read-only* bit: it does not produce a POSIX
+    #: ``rw-------`` file and it does not remove inherited ACL entries. What keeps the
+    #: key private on Windows is the inherited DACL of ``%LOCALAPPDATA%``, which is
+    #: scoped to the signed-in user. The same distinction applies to
+    #: ``DpapiFileStore``: the bytes there are DPAPI user scope, so they are useless to
+    #: any other account even if the file is copied off the machine, and file mode bits
+    #: were never the control being relied on.
     session_cookie_name: str = "hexton_session"
     session_max_age_seconds: int = 12 * 60 * 60
 

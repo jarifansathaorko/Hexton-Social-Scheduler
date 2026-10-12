@@ -110,6 +110,17 @@ class PlatformConnector(ABC):
 
     # -- identity ------------------------------------------------------------
 
+    #: Whether a call on this connector can reach the real platform at all.
+    #:
+    #: ``False`` means every call either *simulates* (the fake connector) or *refuses*
+    #: (a connector that is not wired in this build). It is the one signal the UI needs
+    #: to say out loud that a "Published" figure on screen is not evidence of a
+    #: published video, and it is deliberately not derived from ``provider``: a
+    #: configured ``youtube`` connector is still a stub until FEAS-01..FEAS-05 pass,
+    #: and reporting "YouTube" as though it worked would be the same misrepresentation
+    #: wearing a different name.
+    reaches_platform: bool = False
+
     @abstractmethod
     def list_owned_channels(self, access_token: str) -> list[ChannelSummary]:
         """``channels.list(mine=true)``. The documented identity check (FEAS-01)."""

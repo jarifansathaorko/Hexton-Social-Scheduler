@@ -15,9 +15,10 @@ from conftest import BASE, FUTURE, PAST, events_for, fresh, reload
 from hexton import quota
 from hexton.db import events as ev
 from hexton.db.models import RemoteObservation, ScheduledJob
-from hexton.domain.jobstate import JobState, PollResult
+from hexton.domain.jobstate import FailureKind, JobState, PollResult
 from hexton.worker.runner import JobRunner
 from hexton.worker.sweep import MAX_POLLS_PER_JOB, PublishConfirmationSweep, poll_delay
+from sqlalchemy import select
 
 
 def uploaded(ctx, new_job, *, publish_at=FUTURE) -> tuple[int, str]:
@@ -81,6 +82,55 @@ def test_awaiting_verification_is_reflected_in_the_ui_label(ctx, new_job) -> Non
         publish_at_passed=True,
     )
     assert "verification" in label.lower()
+
+
+def test_a_private_video_with_no_publication_time_is_not_reported_as_scheduled() -> None:
+    """F-12: ``remote_state_of`` returned ``remote.scheduled`` for any private video.
+
+    The ``publish_at``-in-the-future branch was the only one that meant "scheduled",
+    and the line after it fell through to the same value when there was no publication
+    time at all. So a private video nothing is going to publish — one uploaded without
+    a ``publishAt``, or whose time has passed and was never honoured — was reported to
+    the dashboard as *Scheduled*, indefinitely. That is a remote publication claim the
+    provider never made.
+    """
+    from hexton.connectors.base import VideoStatus
+    from hexton.worker.runner import remote_state_of
+
+    private = VideoStatus(video_id="v1", privacy_status="private", upload_status="uploaded")
+
+    # No publication time anywhere: nothing is going to publish this.
+    assert remote_state_of(private, publish_at=None, now=BASE) == "remote.other_privacy", (
+        "a private video with nothing scheduled is not 'Scheduled'"
+    )
+    # A publication time that has passed is not a future one either.
+    assert remote_state_of(private, publish_at=PAST, now=BASE) == "remote.other_privacy"
+    # …while a genuinely future publication time still reads as scheduled.
+    assert remote_state_of(private, publish_at=FUTURE, now=BASE) == "remote.scheduled"
+    # And the provider's own publishAt is preferred over the local plan.
+    scheduled = VideoStatus(
+        video_id="v2",
+        privacy_status="private",
+        upload_status="uploaded",
+        publish_at=FUTURE,
+    )
+    assert remote_state_of(scheduled, publish_at=None, now=BASE) == "remote.scheduled"
+
+
+def test_processing_still_beats_privacy_when_the_video_is_not_ready(ctx, new_job) -> None:
+    from hexton.connectors.base import VideoStatus
+    from hexton.worker.runner import remote_state_of
+
+    processing = VideoStatus(
+        video_id="v3",
+        privacy_status="private",
+        upload_status="uploaded",
+        processing_status="processing",
+    )
+    assert remote_state_of(processing, publish_at=None, now=BASE) == ("remote.uploaded_processing")
+    # Public still wins outright, because that is the one claim PUBLISHED rests on.
+    public = VideoStatus(video_id="v4", privacy_status="public", upload_status="uploaded")
+    assert remote_state_of(public, publish_at=None, now=BASE) == "remote.public"
 
 
 def test_a_video_that_has_not_published_yet_is_not_rushed(ctx, new_job) -> None:
@@ -177,6 +227,84 @@ def test_without_a_credential_nothing_is_assumed(ctx, new_job) -> None:
     assert ctx.connector.call_count("get_video") == 0
 
 
+def test_a_stale_access_token_is_refreshed_the_way_the_runner_refreshes_it(ctx, new_job) -> None:
+    """F-22: ``sweep._token`` handed back whatever string was stored and never looked at expiry.
+
+    ``runner._access_token`` checks ``token_expires_at``, refreshes when it is stale,
+    writes the new expiry, stamps ``last_token_check_*``, flips an ``expired`` connection
+    back to ``active`` and charges for the call. The sweep did none of it. A verification
+    that outlived the one-hour access token therefore kept polling with a dead credential
+    and never recovered on its own, while the connection's own record still claimed the
+    last token check had succeeded.
+    """
+    from hexton.db.models import PlatformConnection
+
+    job_id, _video = uploaded(ctx, new_job)
+    make_due(ctx, job_id)
+    with fresh(ctx) as s:
+        conn = s.get(ScheduledJob, job_id).connection
+        assert conn is not None
+        conn.token_expires_at = BASE - timedelta(minutes=5)
+        conn.last_token_check_at = None
+        conn.last_token_check_ok = None
+        public_id = conn.public_id
+        s.commit()
+
+    refreshes = ctx.connector.call_count("refresh")
+    result = PublishConfirmationSweep(ctx).run(now=BASE)
+
+    assert result.examined == 1
+    assert ctx.connector.call_count("refresh") == refreshes + 1, "the stored token had expired"
+    with fresh(ctx) as s:
+        conn = s.execute(
+            select(PlatformConnection).where(PlatformConnection.public_id == public_id)
+        ).scalar_one()
+        assert conn.token_expires_at == BASE + timedelta(seconds=3600)
+        assert conn.last_token_check_at == BASE
+        assert conn.last_token_check_ok is True
+
+
+def test_a_refresh_refused_during_a_sweep_starts_the_df21_deletion_clock(ctx, new_job) -> None:
+    """F-22 again: the sweep swallowed ``ConnectorError`` and simply returned ``None``.
+
+    So the one code path that *discovers* a grant has died never wrote ``DF-21``'s
+    30-calendar-day deletion deadline, never set ``last_token_check_ok = False``, and the
+    compliance diagnostic kept describing a connection whose credential is gone as
+    healthy. Two independent ways to lose the same clock, and neither was reachable from
+    here.
+    """
+    from hexton.db.models import DataRetention, PlatformConnection
+
+    job_id, _video = uploaded(ctx, new_job)
+    make_due(ctx, job_id)
+    with fresh(ctx) as s:
+        conn = s.get(ScheduledJob, job_id).connection
+        assert conn is not None
+        public_id = conn.public_id
+        ctx.credentials.delete(f"conn:{public_id}:access")
+        conn.token_expires_at = None
+        s.commit()
+    ctx.connector.state.fail_always["refresh"] = FailureKind.AUTHORIZATION
+
+    result = PublishConfirmationSweep(ctx).run(now=BASE)
+
+    assert result.pending == 1
+    assert ctx.connector.call_count("get_video") == 0, "nothing was read with a dead grant"
+    with fresh(ctx) as s:
+        conn = s.execute(
+            select(PlatformConnection).where(PlatformConnection.public_id == public_id)
+        ).scalar_one()
+        assert conn.last_token_check_ok is False, "the compliance diagnostic reads this"
+        assert conn.last_token_check_at == BASE
+        rows = (
+            s.execute(select(DataRetention).where(DataRetention.subject_id == public_id))
+            .scalars()
+            .all()
+        )
+        assert rows, "DF-21's deadline must be written from this path too"
+        assert rows[0].deadline == BASE + timedelta(days=30)
+
+
 def test_a_video_id_that_does_not_resolve_is_not_read_as_deletion(ctx, new_job) -> None:
     job_id, video_id = uploaded(ctx, new_job)
     make_due(ctx, job_id)
@@ -268,7 +396,14 @@ def test_the_delay_never_regresses_as_publication_recedes(ctx, new_job) -> None:
 
 
 def test_polling_stops_at_the_documented_ceiling(ctx, new_job) -> None:
-    """Past the ceiling the sweep stops spending quota and stays honest instead."""
+    """Past the ceiling the sweep stops spending quota and stays honest instead.
+
+    The assertion used to be ``next_poll_at is None``. That is *why* the ceiling did not
+    work: the due query treats a NULL ``next_poll_at`` as "never polled, therefore due
+    now", so a capped job was re-polled on every single tick — the ceiling that existed
+    to protect the daily quota instead guaranteed this job was the first thing to
+    consume it, indefinitely. Stopped means *not due*, which is what is pinned now.
+    """
     job_id, _ = uploaded(ctx, new_job)
     make_due(ctx, job_id)
     with fresh(ctx) as s:
@@ -284,9 +419,16 @@ def test_polling_stops_at_the_documented_ceiling(ctx, new_job) -> None:
             )
         s.commit()
 
-    PublishConfirmationSweep(ctx).run(now=BASE)
+    sweep = PublishConfirmationSweep(ctx)
+    sweep.run(now=BASE)
 
     row = reload(ctx, job_id)
-    assert row.next_poll_at is None  # stopped, rather than polling for ever
+    assert row.next_poll_at is not None, "a capped job must leave the due set"
+    assert row.next_poll_at > BASE + timedelta(days=1)
     assert row.state == JobState.SCHEDULED.value
     assert any("can be checked by hand" in msg for _k, msg in events_for(ctx, job_id))
+
+    # And it is genuinely gone: a later sweep examines nothing at all, so the quota is
+    # no longer being spent on a job that has already decided to stop asking.
+    after = sweep.run(now=BASE + timedelta(days=1))
+    assert after.examined == 0, "the ceiling must actually keep the job out of the sweep"

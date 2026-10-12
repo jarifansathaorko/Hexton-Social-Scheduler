@@ -37,6 +37,7 @@ from hexton.db.models import (
     ScheduledJob,
 )
 from hexton.domain.jobstate import (
+    FailureKind,
     JobState,
     can_transition,
     video_has_been_public,
@@ -416,7 +417,15 @@ def duplicate_job(
 
 
 def delete_draft(session: Session, job: ScheduledJob) -> None:
-    """Remove a job that never left this machine."""
+    """Remove a job that never left this machine.
+
+    ``CANCELLED`` is allowed because cancelling *is* the operator saying they are done
+    with it — but only while that remains true. A cancelled job can still be holding a
+    video ID, an unresolved ``insert_may_have_succeeded``, or a remote outcome that was
+    never settled: deleting it then destroys the only record of something that exists
+    on YouTube, which is precisely what the guard below exists to prevent for every
+    other state. So the state check and the evidence check are the same check.
+    """
     state = JobState(job.state)
     if state not in (JobState.DRAFT, JobState.CANCELLED):
         raise JobOperationError(
@@ -424,6 +433,14 @@ def delete_draft(session: Session, job: ScheduledJob) -> None:
             f"reached {state.value} may have a video on YouTube, so deleting the local "
             f"record would lose the audit trail for something that still exists "
             f"remotely.",
+            code="not_deletable",
+        )
+    if job.video_id is not None or job.insert_may_have_succeeded:
+        raise JobOperationError(
+            "This cancelled job still refers to a video — or to an upload whose "
+            "outcome was never confirmed — so it is the audit trail for something "
+            "that may exist on YouTube. Delete the video first, or leave the record "
+            "in place.",
             code="not_deletable",
         )
     session.delete(job)
@@ -502,6 +519,22 @@ def retry_job(session: Session, job: ScheduledJob, *, now: datetime) -> None:
 # ----------------------------------------------------------------------
 
 
+#: Opening of the record written when a reschedule moved the local plan but YouTube
+#: refused (or was never asked). It is also the marker the next successful reschedule
+#: looks for, so that clearing a disagreement never erases some *other* failure the job
+#: is still carrying — a successful ``videos.update`` must not silence a failed upload.
+_RESCHEDULE_DISAGREEMENT = (
+    "The publication time changed in Hexton but not on YouTube, so the two disagree:"
+)
+
+
+def _clear_reschedule_disagreement(job: ScheduledJob) -> None:
+    """Drop a disagreement this function wrote, and only that one."""
+    if job.failure_message and job.failure_message.startswith(_RESCHEDULE_DISAGREEMENT):
+        job.failure_kind = None
+        job.failure_message = None
+
+
 def reschedule_job(
     ctx: AppContext,
     session: Session,
@@ -519,23 +552,30 @@ def reschedule_job(
     at = ensure_utc(publish_at, field="publish_at_utc")
     state = JobState(job.state)
 
-    if state is JobState.PUBLISHED:
+    observed_privacy = job.observations[-1].privacy_status if job.observations else None
+    has_been_public = video_has_been_public(state, job.published_at_remote, observed_privacy)
+
+    if has_been_public:
+        # Not just ``state is PUBLISHED``. ``DF-03`` is about the *video*, and the
+        # video's history is a separate question from this job's label: a sweep can
+        # have recorded ``published_at_remote`` on a row still sitting in ``UPLOADED``,
+        # and the newest observation can read ``public`` while the state machine has
+        # not caught up. Letting either through would push a ``publishAt`` that the
+        # documentation says is not honoured on an already-published video — so the
+        # local row would show a schedule YouTube has quietly declined, which is the
+        # wrong-remote-state failure in its most convincing form.
         raise JobOperationError(
-            "This video is already published. A published video cannot be scheduled "
-            "again through this API path — publication times apply only to videos "
-            "that have never been published — so Hexton will not pretend to reschedule "
-            "it.",
+            "This video is already published. A publication time can only be set on a "
+            "video that has never been published — publishAt applies only to a video "
+            "that has never published, and this API does not honour it afterwards, so "
+            "Hexton will not record a schedule it cannot send.",
             code="already_published",
         )
 
     check = check_publish_time(
         at,
         now=now,
-        never_published=not video_has_been_public(
-            state,
-            job.published_at_remote,
-            job.observations[-1].privacy_status if job.observations else None,
-        ),
+        never_published=not has_been_public,
         min_lead_minutes=job.schedule.min_lead_minutes,
         warning_lead_minutes=ctx.settings.warning_lead_minutes,
     )
@@ -550,11 +590,12 @@ def reschedule_job(
     job.rescheduled_at = now
     job.updated_at = now
 
-    remote_note = None
+    remote_note: str | None = None
+    remote_accepted = False
     if job.video_id is not None:
         # The video already exists on YouTube, so the change has to be sent there too.
         # ``DF-06`` means the whole snippet goes with it, or the description is deleted.
-        remote_note = _push_status(
+        pushed = _push_status(
             ctx,
             session,
             job,
@@ -563,10 +604,27 @@ def reschedule_job(
             now=now,
             reason="rescheduled",
         )
+        remote_note = pushed.sentence
+        remote_accepted = pushed.accepted
 
-    state = JobState(job.state)
-    if state is not JobState.SCHEDULED and can_transition(state, JobState.SCHEDULED):
-        job.state = JobState.SCHEDULED.value
+    if job.video_id is None:
+        # Nothing exists on YouTube to hold this time, so no state may claim it does.
+        # ``NEEDS_REVIEW -> SCHEDULED`` is legal, which would otherwise let an
+        # ambiguous job with no video ID announce "Scheduled on YouTube" the moment an
+        # operator edited its publication time (F-05).
+        pass
+    elif remote_accepted:
+        state = JobState(job.state)
+        if state is not JobState.SCHEDULED and can_transition(state, JobState.SCHEDULED):
+            job.state = JobState.SCHEDULED.value
+        _clear_reschedule_disagreement(job)
+    else:
+        # The local plan moved and the remote did not. Saying so is the whole of the
+        # obligation: an operator who sees "Scheduled on YouTube" for a video YouTube
+        # still holds at the old time — or with no time at all — has been told a lie by
+        # the one screen they trust (F-05).
+        job.failure_kind = FailureKind.HUMAN_REQUIRED.value
+        job.failure_message = f"{_RESCHEDULE_DISAGREEMENT} {remote_note}"
     job.next_poll_at = at
     job.poll_result = None
 
@@ -583,6 +641,53 @@ def reschedule_job(
     return job
 
 
+def may_issue_snippet_update(job: ScheduledJob) -> tuple[bool, str]:
+    """Whether a ``videos.update`` carrying this job's own snippet may be sent.
+
+    ``D-6`` / ``FEAS-06`` / ``DF-06`` / ``AC-MVP-009``. ``may_issue_videos_update``
+    has existed since Phase 0, is what ``07-feasibility-checklist.md`` §FEAS-06
+    describes as encoding the failure fallback, and was never called from production
+    code — so the rule "the app must not issue ``videos.update`` on a
+    ``manual_required`` job at all" was a documented intention rather than a property
+    of the running system. Both ``videos.update`` sites in the application go through
+    here now.
+
+    ``description_changing=False`` is a fact rather than a relaxation. Content is
+    frozen once bytes have left this machine (``EDITABLE_STATES``), so the snippet
+    travelling with this request is byte-for-byte the one Hexton uploaded: nothing
+    Hexton holds is being rewritten. What Hexton *cannot* know is whether an operator
+    edited the description in YouTube Studio since — the API has no way to read that
+    back (``DF-19``) — and that uncertainty is exactly what ``manual_required``
+    records and what ``D-6`` answers with "do not issue the update; edit in Studio".
+    ``rewrite_risk``'s decision branch is therefore not the one that applies here, and
+    passing ``description_changing=True`` would additionally refuse every
+    ``text_only`` job on the strength of an ``@handle`` the description does not
+    contain.
+    """
+    from hexton.domain.mention import may_issue_videos_update
+    from hexton.services.mentions import current_state
+
+    return may_issue_videos_update(
+        current_state(job),
+        update_includes_full_snippet=True,
+        description_changing=False,
+    )
+
+
+@dataclass(frozen=True)
+class PushOutcome:
+    """Whether YouTube took a ``videos.update``, plus the sentence to record with it.
+
+    ``sentence`` is a description for an event log. ``accepted`` is the only part a
+    state machine may act on: F-05 was a caller reading a sentence that said "YouTube
+    was not told" and writing ``SCHEDULED`` anyway, because nothing in the return type
+    distinguished "accepted" from "here is what happened".
+    """
+
+    accepted: bool
+    sentence: str
+
+
 def _push_status(
     ctx: AppContext,
     session: Session,
@@ -592,31 +697,54 @@ def _push_status(
     publish_at: datetime | None,
     now: datetime,
     reason: str,
-) -> str:
+) -> PushOutcome:
     """Send a *complete* status+snippet change for an existing video.
 
-    Returns a sentence describing what actually happened, which the caller records.
-    That sentence is the deliverable: an operator is entitled to know whether YouTube
-    accepted the change, refused it, or was never asked.
+    The sentence is what the caller records: an operator is entitled to know whether
+    YouTube accepted the change, refused it, or was never asked. ``accepted`` is True
+    only when the provider itself answered — not when the local bookkeeping succeeded.
     """
     conn = job.connection
     if conn is None or conn.status != "active":
-        return (
+        return PushOutcome(
+            False,
             "The local plan was updated, but no connection is active, so YouTube was "
-            "not told and still holds the previous publication time."
+            "not told and still holds the previous publication time.",
         )
 
     token = _token(ctx, conn)
     if token is None:
-        return (
+        return PushOutcome(
+            False,
             "The local plan was updated, but no usable credential is stored, so YouTube "
-            "was not told and still holds the previous publication time."
+            "was not told and still holds the previous publication time.",
         )
 
     if not quota_mod.can_afford_on(session, conn.provider, quota_mod.COST_UPDATE, now):
-        return (
+        return PushOutcome(
+            False,
             "The local plan was updated, but the daily quota has no room for the "
-            "50-unit videos.update, so YouTube was not told yet."
+            "50-unit videos.update, so YouTube was not told yet.",
+        )
+
+    allowed, why_not = may_issue_snippet_update(job)
+    if not allowed:
+        # The local plan has already been written by the caller, so the sentence this
+        # returns is appended to that record — it must say plainly that YouTube still
+        # holds the previous publication time, which is what every other refusal in
+        # this function says.
+        ev.record_event(
+            session,
+            job_id=job.id,
+            kind=ev.KIND_NEEDS_REVIEW,
+            message="The local plan changed but no videos.update was sent: " + why_not,
+            payload={"reason": reason},
+        )
+        return PushOutcome(
+            False,
+            "The local plan was updated, but YouTube was not asked to change it "
+            f"because this job's mention forbids a metadata update: {why_not} YouTube "
+            "still holds the previous publication time.",
         )
 
     try:
@@ -641,11 +769,13 @@ def _push_status(
             f"updated, so the two now disagree; this is reported rather than hidden.",
             payload={"reason": reason},
         )
-        return f"YouTube did not accept the change: {exc}"
+        return PushOutcome(False, f"YouTube did not accept the change: {exc}")
 
     quota_mod.add_units_on(session, conn.provider, quota_mod.COST_UPDATE, now)
-    return f"YouTube accepted the change; the video is now {status.privacy_status!r}" + (
-        f" with a publication time of {publish_at.isoformat()}." if publish_at else "."
+    return PushOutcome(
+        True,
+        f"YouTube accepted the change; the video is now {status.privacy_status!r}"
+        + (f" with a publication time of {publish_at.isoformat()}." if publish_at else "."),
     )
 
 
@@ -700,6 +830,24 @@ def cancel_job(
             f"A job in {state.value} cannot be cancelled.", code="not_cancellable"
         )
 
+    if (
+        state is JobState.UPLOADING
+        and job.lease_owner
+        and (job.lease_expires_at is None or job.lease_expires_at > now)
+    ):
+        # ``UPLOADING -> CANCELLED`` is not in the transition table, and writing the
+        # column directly would only pretend. A worker is inside the transfer right
+        # now: it will commit its own result a moment later and overwrite whatever we
+        # set here, leaving an operator with a row that says "cancelled" and a video
+        # that exists. Wait for the transfer to end — or for its lease to lapse — and
+        # then decide, which is exactly what the state machine already requires.
+        raise JobOperationError(
+            "This job is uploading right now, so cancelling it would be overwritten by "
+            "the worker a moment later. Wait for the transfer to finish (or for its "
+            "lease to expire) and cancel then.",
+            code="upload_in_progress",
+        )
+
     job.cancelled_at = now
     job.state = JobState.CANCELLED.value
     job.next_attempt_at = None
@@ -715,6 +863,23 @@ def cancel_job(
     )
 
     if job.video_id is None:
+        if job.insert_may_have_succeeded:
+            # The bytes may be on their way right now, or may already have landed. The
+            # absence of a video *ID* is not the absence of a video, and saying so is
+            # the one sentence an operator would repeat to a client: "nothing was ever
+            # uploaded". The honest answer is that the outcome is unknown and remains
+            # so — which is also why ``insert_may_have_succeeded`` is not cleared here.
+            job.cancel_remote_outcome = "remote_unknown"
+            session.flush()
+            return CancelOutcome(
+                local_cancelled=True,
+                remote_attempted=False,
+                remote_succeeded=None,
+                message="Cancelled locally. Hexton has no video ID for this job, but an "
+                "earlier upload attempt ended without a definite answer, so a video may "
+                "still exist on YouTube. It was not touched and must be checked by hand "
+                "before anything is uploaded again.",
+            )
         job.cancel_remote_outcome = "not_applicable"
         session.flush()
         return CancelOutcome(
@@ -761,6 +926,28 @@ def cancel_job(
                     else f"Cancelled locally. YouTube reported that video "
                     f"{job.video_id} does not exist."
                 ),
+            )
+
+        allowed, why_not = may_issue_snippet_update(job)
+        if not allowed:
+            job.cancel_remote_outcome = "not_attempted"
+            ev.record_event(
+                session,
+                job_id=job.id,
+                kind=ev.KIND_CANCEL_REMOTE_FAILED,
+                message=f"YouTube was not asked to change video {job.video_id}, so its "
+                f"publication was not cancelled there: {why_not}",
+                payload={"video_id": job.video_id},
+            )
+            session.flush()
+            return CancelOutcome(
+                local_cancelled=True,
+                remote_attempted=False,
+                remote_succeeded=None,
+                message=f"Cancelled locally, but no change was sent to YouTube for "
+                f"video {job.video_id}: {why_not} It may still publish at its original "
+                f"time, so make it private in YouTube Studio now, or cancel with "
+                f'"delete the video" instead.',
             )
 
         status = ctx.connector.update_video_status(
@@ -835,22 +1022,7 @@ def find_job(session: Session, job_id: int) -> ScheduledJob | None:
     return session.get(ScheduledJob, job_id)
 
 
-def list_jobs(
-    session: Session,
-    *,
-    query: str | None = None,
-    state: str | None = None,
-    limit: int = 200,
-    offset: int = 0,
-) -> tuple[list[ScheduledJob], int]:
-    stmt = select(ScheduledJob)
-    if state:
-        stmt = stmt.where(ScheduledJob.state == state)
-    if query:
-        like = f"%{query.strip()}%"
-        stmt = stmt.join(ScheduledJob.content).where(
-            (ContentMetadata.title.like(like)) | (ContentMetadata.description.like(like))
-        )
-    total = session.execute(stmt).scalars().all()
-    rows = sorted(total, key=lambda j: j.id, reverse=True)
-    return rows[offset : offset + limit], len(rows)
+# ``list_jobs`` lived here until the jobs list endpoint was rewritten to filter, order
+# and page in SQL (``F-20``). Nothing called it after that: it loaded every row, sorted
+# them in Python and then sliced, so keeping it around was a standing invitation to
+# reintroduce the O(table) list endpoint it had just been replaced by.

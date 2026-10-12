@@ -61,6 +61,97 @@ Give all eight files to the coding agent at the beginning. Ask it to read and su
 - The web UI can be local, but background jobs must run in a persistent backend/worker independently from the browser tab, **as the same interactive Windows user that authorized the accounts**, so that Credential Manager and user-scoped DPAPI remain readable.
 - Disconnecting a channel and revoking Google access are **different operations** with different consequences. Only revocation is governed by the YouTube API Services Terms of Service.
 
+## Running the build (updated 2026-10-12)
+
+Everything below runs with no Google Cloud project and can publish nothing. The Phase 0
+gate (`08` §9) has not passed, so the real `YouTubeConnector` and live Sheets are still
+deliberately unwired; the app runs against the fake connector and says so in the UI.
+
+### Prerequisites
+
+- Windows, Python ≥ 3.12 (verified on 3.14.7), Node 24 / npm 11.
+- One virtualenv at `backend/.venv`.
+
+### Backend
+
+```powershell
+cd backend
+.venv\Scripts\python.exe -m pip install -e ".[dev]"
+.venv\Scripts\python.exe -m hexton migrate      # serve does NOT run migrations
+.venv\Scripts\python.exe -m hexton serve        # API + worker on http://127.0.0.1:8787
+```
+
+Subcommands: `info` (resolved configuration), `migrate`, `revision`, `worker` (a worker
+in its own terminal), `serve --no-start-worker`, `dev` (API and worker in one process).
+
+### Frontend
+
+```powershell
+cd frontend
+npm install
+npm run build                                   # tsc --noEmit && vite build -> dist/
+```
+
+`serve` and `dev` serve `frontend/dist` from the API's own origin, so **rebuild after any
+frontend change** — editing source alone has no effect on what the server hands out.
+
+### Tests
+
+```powershell
+# backend — 562 tests, lint and format
+cd backend
+.venv\Scripts\python.exe -m pytest tests -p no:cacheprovider -q
+.venv\Scripts\python.exe -m ruff check hexton tests
+.venv\Scripts\python.exe -m ruff format --check hexton tests
+
+# frontend — typecheck, eslint, production build, 21 Playwright tests
+cd frontend
+npm run typecheck
+npm run lint
+npm run build
+npx playwright test        # npm test does build + playwright
+```
+
+Playwright starts its own server (`e2e/server.mjs`) on `127.0.0.1:8797` against a
+throwaway data directory in `%TEMP%\opencode\hexton-e2e`, seeds it, then runs
+`setup → core → worker` in order against one database.
+
+### Configuration
+
+Every setting is an environment variable with the `HEXTON_` prefix (or a `.env` beside
+the backend). The ones that change behaviour:
+
+| Variable | Values | Note |
+|---|---|---|
+| `HEXTON_CONNECTOR_KIND` | `fake` (default) / `youtube` | `fake` is refused in a packaged build |
+| `HEXTON_CREDENTIAL_STORE_KIND` | `auto` (default) / `windows_credential_manager` / `dpapi_file` / `plaintext` | `plaintext` additionally needs `HEXTON_ALLOW_PLAINTEXT_CREDENTIALS=true` **and** `HEXTON_ALLOW_PLAINTEXT=1` |
+| `HEXTON_DATA_DIR` | path | defaults to `%LOCALAPPDATA%\Hexton` |
+| `HEXTON_HOST` / `HEXTON_PORT` | `127.0.0.1` / `8787` | loopback only; `0.0.0.0` is not offered |
+
+For development, leave `HEXTON_CONNECTOR_KIND=fake` — that is what the banner, the queue
+and the fixtures in `frontend/e2e/` are written against.
+
+## Known limitations (2026-10-12 remediation)
+
+Recorded deliberately, with the reason, so nobody re-litigates them as bugs:
+
+1. **Same-user local processes are inside the trust boundary.** The session cookie is
+   minted for any local client that can reach `127.0.0.1`, not only for a browser.
+   Browser CSRF and DNS rebinding *are* blocked (forged `Origin` and `Host` both 403).
+   A non-browser process running as the same Windows user can already read the session
+   key, the database and the credential store, so restricting the API to browsers would
+   add no security. The alternative — a long-lived credential the operator manages by
+   hand — is a worse trade for a single-user local app. (`F-31`.)
+2. **`os.chmod(..., 0o600)` is not a user-only ACL on Windows.** The C runtime honours
+   only the read-only bit. What protects `session.key` is the inherited DACL of
+   `%LOCALAPPDATA%`; what protects the credential file is DPAPI user scope, which makes
+   the bytes unreadable to any other account regardless of file mode. No ACL tooling is
+   written for this. (`F-25`.)
+3. **`mypy --strict` is not a gate.** It reports 46 errors across 17 files; `ruff`,
+   `eslint`, `tsc --noEmit` and the two test suites are the enforced gates.
+4. **The Phase 0 gate is still closed.** No live-Google `FEAS-*` item is `verified`, so
+   no claim about real YouTube behaviour has been made in this codebase.
+
 ## Correction log — revision 1.1 (2026-10-11)
 
 An architecture review on 2026-10-11 checked every load-bearing claim in this pack against the live official documentation. The following corrections are now applied across `01`–`06`:

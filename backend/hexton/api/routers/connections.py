@@ -59,6 +59,19 @@ RETENTION_DAYS_GOOGLE = 30
 
 _REDIRECT_PATH = "/oauth/callback"
 
+#: The loopback redirect target lives *outside* ``/api`` on purpose and on its own
+#: router so the ``/api/connections`` prefix cannot be applied to it.
+#:
+#: Two independent reasons it must be exactly this path:
+#:
+#: * ``authorize`` advertises ``redirect_uri`` to Google as ``{_REDIRECT_PATH}``. The
+#:   route and the advertised URI have to be the same string, or the browser lands on
+#:   the single-page fallback after consent and the callback handler never runs.
+#: * ``SameSite=Strict`` means the session cookie is *not* sent on the cross-site
+#:   top-level navigation back from accounts.google.com, so a route under ``/api``
+#:   would be answered with 401 before it could validate ``state``.
+callback_router = APIRouter(tags=["connections"])
+
 
 @dataclass
 class PendingFlow:
@@ -75,6 +88,38 @@ class PendingFlow:
 
 _flows: dict[str, PendingFlow] = {}
 _flows_lock = threading.Lock()
+
+#: How long an authorization request stays valid. The flow is one browser round trip,
+#: so anything older was abandoned; keeping it around only lengthens the window in
+#: which a captured ``state`` would still be accepted, and an unbounded ``_flows``
+#: dict is a slow leak in a process that is meant to run for weeks.
+FLOW_TTL = timedelta(minutes=10)
+
+
+def _prune_flows(now: datetime) -> None:
+    """Drop expired pending flows. Caller holds ``_flows_lock``."""
+    cutoff = now - FLOW_TTL
+    for stale in [key for key, flow in _flows.items() if flow.created_at < cutoff]:
+        del _flows[stale]
+
+
+def _put_flow(flow: PendingFlow) -> None:
+    now = datetime.now(UTC)
+    with _flows_lock:
+        _prune_flows(now)
+        _flows[flow.state] = flow
+
+
+def _take_flow(state: str) -> PendingFlow | None:
+    """Pop ``state``, expiring anything stale first.
+
+    Expiry happens *before* the lookup so an abandoned flow from yesterday answers
+    "unknown or already-used state" rather than validating.
+    """
+    now = datetime.now(UTC)
+    with _flows_lock:
+        _prune_flows(now)
+        return _flows.pop(state, None)
 
 
 # ----------------------------------------------------------------------
@@ -152,14 +197,15 @@ def authorize(
     conn = _load(session, connection_id)
     state = secrets.token_urlsafe(24)
     verifier = secrets.token_urlsafe(48)
-    with _flows_lock:
-        _flows[state] = PendingFlow(
+    _put_flow(
+        PendingFlow(
             state=state,
             verifier=verifier,
             connection_id=conn.id,
             created_at=datetime.now(UTC),
             scopes=tuple(conn.scopes or REQUESTED_SCOPES),
         )
+    )
 
     redirect = f"http://{ctx.settings.host}:{ctx.settings.port}{_REDIRECT_PATH}"
     params = [
@@ -191,7 +237,7 @@ def authorize(
     }
 
 
-@router.get(_REDIRECT_PATH)
+@callback_router.get(_REDIRECT_PATH)
 def oauth_callback(
     code: str | None = None,
     state: str | None = None,
@@ -204,8 +250,7 @@ def oauth_callback(
         raise HTTPException(status_code=400, detail=f"Authorization was refused: {error}")
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state.")
-    with _flows_lock:
-        flow = _flows.pop(state, None)
+    flow = _take_flow(state)
     if flow is None:
         # An unknown state is exactly the CSRF condition this check exists for.
         raise HTTPException(
@@ -384,8 +429,12 @@ def revoke(
     conn = _load(session, connection_id)
     key = f"conn:{conn.public_id}"
     now = datetime.now(UTC)
-    revoked_remotely = False
 
+    # Always ``"client"`` here, and that is the point of this route: it is the
+    # operator's own action. ``revoked_by`` is also written as ``"google"`` when a
+    # grant stops refreshing (see ``JobRunner._record_unrefreshable``) — that is a
+    # different actor with a different deletion deadline under ``DF-21``, so it must
+    # not be decided by a local flag that was always false.
     refresh = ctx.credentials.read(f"{key}:refresh")
     access = ctx.credentials.read(f"{key}:access")
     for token in (access, refresh):
@@ -400,7 +449,7 @@ def revoke(
 
     conn.status = "revoked"
     conn.revoked_at = now
-    conn.revoked_by = "google" if revoked_remotely else "client"
+    conn.revoked_by = "client"
     session.add(
         DataRetention(
             subject_type="connection",
@@ -436,10 +485,15 @@ def mark_data_deleted(connection_id: int, session: Session = SessionDep) -> Conn
 def delete_connection(
     connection_id: int, session: Session = SessionDep, ctx: AppContext = CtxDep
 ) -> None:
+    """Remove a connection that nothing references.
+
+    The reference check happens **before** anything is destroyed. The order used to be
+    the other way round: the credential was deleted first and the ``409`` raised second,
+    so a connection with jobs answered "this connection is referenced by at least one
+    job" while its refresh token had already gone — a refusal that had nonetheless
+    performed half of a revoke, with no way to undo it.
+    """
     conn = _load(session, connection_id)
-    key = f"conn:{conn.public_id}"
-    for name in ("access", "refresh"):
-        ctx.credentials.delete(f"{key}:{name}")
     jobs = session.execute(
         select(ScheduledJob.id).where(ScheduledJob.connection_id == conn.id).limit(1)
     ).first()
@@ -449,6 +503,9 @@ def delete_connection(
             detail="This connection is referenced by at least one job. Cancel or "
             "reassign those jobs first.",
         )
+    key = f"conn:{conn.public_id}"
+    for name in ("access", "refresh"):
+        ctx.credentials.delete(f"{key}:{name}")
     session.delete(conn)
     session.commit()
 

@@ -692,6 +692,11 @@ def test_the_diagnostic_route_distinguishes_the_two_families(client, ctx, sessio
         failing.granted_at = BASE
         failing.last_token_check_ok = False
         s.commit()
+    # ``failing`` has to *have* a credential, or the answer really is "not connected"
+    # and the test proves nothing about the remote-failure branch. Reading the store is
+    # the whole point of ``COMP-10``: an "active" row whose credential is already gone
+    # used to be reported as healthy.
+    ctx.credentials.write(f"conn:{failing.public_id}:access", "stored-access-token")
 
     _csrf(client)
     client.post("/api/compliance/policy/accept", json={"accepted_by": "op"}, headers=_csrf(client))
@@ -703,6 +708,31 @@ def test_the_diagnostic_route_distinguishes_the_two_families(client, ctx, sessio
     assert failed["code"] == "remote_failed"
     assert missing["retry_worthwhile"] is False
     assert failed["retry_worthwhile"] is True
+
+
+def test_a_credential_missing_from_the_store_is_not_reported_as_connected(
+    client, ctx, session, connection
+) -> None:
+    """``COMP-10``: the diagnostic must read the credential store, not the row's status.
+
+    ``connection`` is ``status="active"`` with a ``granted_at`` set, so every column the
+    old code consulted said "connected". Its credential is removed underneath it — the
+    state a partial revoke or a manual clear of the store leaves behind — and reporting
+    ``ok`` / "Connected and reachable." there sends the operator to the wrong fix.
+    """
+    conn = connection
+    conn.granted_at = BASE
+    session.commit()
+    ctx.credentials.delete(f"conn:{conn.public_id}:access")
+    ctx.credentials.delete(f"conn:{conn.public_id}:refresh")
+
+    _csrf(client)
+    client.post("/api/compliance/policy/accept", json={"accepted_by": "op"}, headers=_csrf(client))
+    body = client.get(f"/api/compliance/connections/{conn.id}/diagnostic").json()
+
+    assert body["code"] != "ok"
+    assert body["retry_worthwhile"] is False
+    assert "connected and reachable" not in body["detail"].lower()
 
 
 def test_every_diagnostic_code_is_reachable_enough_to_be_labelled(client) -> None:
@@ -843,3 +873,81 @@ def test_a_channel_identity_survives_a_disable_but_not_a_purge(ctx, session, con
 
     with ctx.sessions() as s:
         assert s.query(ChannelIdentity).filter_by(connection_id=conn.id).count() == 0
+
+
+# ==========================================================================
+# Regression: F-01 (retention purge vs. a job that references the identity)
+# ==========================================================================
+
+
+def test_purging_a_connection_that_has_jobs_does_not_raise(ctx, session, connection, clip) -> None:
+    """``scheduled_job.channel_identity_id`` is ``ondelete="RESTRICT"``.
+
+    The sweep deleted the identity while a job still pointed at it, so the flush raised
+    ``IntegrityError``. Because ``Worker.startup`` runs this unguarded, that exception
+    stopped the *worker* — seven days after any revocation that had a single job behind
+    it, every scheduled upload on the machine silently stopped.
+    """
+    conn = connection
+    media = make_media(session, clip)
+    job = make_job(session, media, conn, state="JOB-PUBLISHED")
+    identity_id = conn.identities[0].id
+    assert job.channel_identity_id == identity_id
+
+    session.add(
+        DataRetention(
+            subject_type="connection",
+            subject_id=conn.public_id,
+            reason="revocation_client",
+            deadline=BASE,
+        )
+    )
+    session.commit()
+
+    report = RetentionSweeper(ctx).run(now=BASE + timedelta(minutes=1))
+
+    assert report.connections_purged == 1
+    assert report.retention_rows_closed == 1
+    with ctx.sessions() as s:
+        assert s.query(ChannelIdentity).count() == 0, "Authorized Data is still deleted"
+        surviving = s.get(ScheduledJob, job.id)
+        assert surviving is not None, "the job's audit trail is untouched"
+        assert surviving.channel_identity_id is None
+        assert surviving.state == "JOB-PUBLISHED"
+        assert any("retention" in event.message.lower() for event in surviving.events), (
+            "the detachment is recorded rather than silent"
+        )
+    assert ctx.credentials.read(f"conn:{conn.public_id}:refresh") is None
+
+
+def test_the_worker_starts_with_an_overdue_retention_deadline(
+    ctx, session, connection, clip
+) -> None:
+    """The sweep must not be able to prevent the worker from running.
+
+    This is the load-bearing assertion for F-01: the defect was not that one purge
+    failed, but that its failure was fatal to ``Worker.startup``.
+    """
+    from hexton.worker.main import Worker
+
+    media = make_media(session, clip)
+    make_job(session, media, connection, state="JOB-QUEUED")
+    session.add(
+        DataRetention(
+            subject_type="connection",
+            subject_id=connection.public_id,
+            reason="revocation_client",
+            deadline=BASE,
+        )
+    )
+    session.commit()
+
+    worker = Worker(ctx, owner="regression-worker")
+    orphans = worker.startup(now=BASE + timedelta(minutes=1))
+
+    assert orphans == []
+    with ctx.sessions() as s:
+        assert s.query(ChannelIdentity).count() == 0
+        assert s.query(ScheduledJob).count() == 1
+        row = s.query(DataRetention).one()
+        assert row.purged_at is not None

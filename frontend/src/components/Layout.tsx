@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
-import { usePolicyStatus, useWorkerStatus } from "../hooks/api";
+import { usePolicyStatus, useSettings, useWorkerStatus } from "../hooks/api";
 import {
   IconCalendar,
   IconChannel,
@@ -182,6 +182,7 @@ export function Layout() {
         </header>
 
         <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8" key={location.pathname}>
+          <ConnectorBanner />
           {!accepted && (
             <div
               role="status"
@@ -223,6 +224,47 @@ function WorkerPill({ alive, owner }: { alive: boolean; owner: string | null }) 
       <span className="truncate">
         {alive ? "Worker running" : "Worker not running"}
       </span>
+    </div>
+  );
+}
+
+/**
+ * "This build cannot publish" — the unmissable version.
+ *
+ * The application ships with a fake connector for development, and the real one is a
+ * stub until the Phase 0 gate passes. In either case a job can still walk all the way
+ * to `Published` and a dashboard can still show a published count, because those are
+ * *local* facts about a local record. Reading either as "a video is on YouTube" is the
+ * mistake this banner exists to prevent, so it sits above every page rather than
+ * behind a settings tab, and it is `role="alert"` because an operator about to hand a
+ * client a link needs to see it before they see anything else.
+ *
+ * It never renders when the connector is real and reachable; a banner that cries wolf
+ * on a working build is one that gets ignored.
+ */
+function ConnectorBanner() {
+  const settings = useSettings();
+  if (!settings.data || settings.data.connector_ready) return null;
+
+  const simulated = settings.data.connector_kind === "fake";
+  const heading = simulated ? "Simulated uploads" : "This build cannot publish to YouTube";
+
+  return (
+    <div
+      role="alert"
+      data-testid="connector-banner"
+      className="mb-6 rounded-md border border-cue-attention/50 bg-cue-attention/10 px-4 py-3 text-sm text-cue-attention"
+    >
+      <p className="font-medium">{heading}</p>
+      <p className="mt-1 text-cue-attention/90">
+        {simulated
+          ? "The fake connector is active, so nothing leaves this computer. Every state, count and timestamp below is produced locally — no video is uploaded to YouTube and no report is written to Google Sheets."
+          : "The YouTube connector is not wired in this build, so an upload attempt fails loudly rather than pretending. No video is uploaded to YouTube and no report is written to Google Sheets."}{" "}
+        <Link className="underline" to="/settings">
+          Connector details in Settings
+        </Link>
+        .
+      </p>
     </div>
   );
 }

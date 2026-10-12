@@ -271,8 +271,10 @@ def removal_risk(
 
     ``02-technical-prd.md`` §6.5 and ``AC-MVP-009``: a later ``videos.update`` can remove
     a manually created mention. The app must warn and must not rewrite the description
-    without an explicit decision. This function is the warning; the API and the worker
-    both consult it, and neither of them is permitted to skip it.
+    without an explicit decision. This function is both halves of that: the warning,
+    rendered as ``rewrite_warning`` by :func:`hexton.services.mentions.view`, and the
+    refusal, reached through :func:`may_issue_videos_update` on the one path in this
+    application that issues a ``videos.update``.
     """
     if not description_changing:
         return RemovalRisk(False, "The description is not being changed.")

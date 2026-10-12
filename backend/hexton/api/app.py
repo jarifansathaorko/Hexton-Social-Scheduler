@@ -18,7 +18,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from hexton import __version__
@@ -104,6 +104,9 @@ def create_app(ctx: AppContext, *, frontend_dist: Path | None = None) -> FastAPI
     app.include_router(media.router)
     app.include_router(jobs.router)
     app.include_router(connections.router)
+    # Registered before the SPA fallback so the loopback redirect target is a real
+    # endpoint rather than an index.html response (see connections.callback_router).
+    app.include_router(connections.callback_router)
     app.include_router(events.router)
     app.include_router(reporting.router)
     app.include_router(compliance.router)
@@ -138,7 +141,16 @@ def _mount_frontend(app: FastAPI, dist: Path) -> None:
     index = dist / "index.html"
 
     @app.get("/{full_path:path}", include_in_schema=False)
-    async def _spa(full_path: str) -> FileResponse:
+    async def _spa(full_path: str) -> Response:
+        if full_path == "api" or full_path.startswith("api/"):
+            # The SPA fallback must never answer for the API. Registered routes are
+            # matched first, so anything reaching here is an unknown endpoint; serving
+            # index.html with a 200 turned a typo into a successful-looking response and
+            # hid real 404s from both an operator and a test.
+            return JSONResponse(
+                status_code=404,
+                content={"detail": f"Unknown endpoint /{full_path}.", "code": "not_found"},
+            )
         candidate = (dist / full_path).resolve() if full_path else index
         # A path traversal attempt must not read outside the bundle directory.
         if full_path and (not candidate.is_relative_to(dist) or not candidate.is_file()):

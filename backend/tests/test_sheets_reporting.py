@@ -246,6 +246,29 @@ def test_a_successful_upload_is_never_reported_as_published(
     assert row["YouTube Video ID"] == "fake-0001"
 
 
+def test_reporting_state_for_never_raises_on_a_published_row() -> None:
+    """F-13: it called ``display_for(state)`` with the defaults.
+
+    ``display_for``'s defaults are ``RemoteState.UNKNOWN`` and
+    ``PollResult.NEVER_POLLED``, and its first rule is to raise when a ``PUBLISHED``
+    row arrives without an observed ``public`` status. That rule is correct for the UI,
+    which must not render an unverified publication — but a *report* is a durable
+    record, not a rendering, and raising left the one job that most needs
+    reconciliation without a row at all. It now goes through ``upload_outcome``, which
+    answers the same evidentiary question rather than refusing to answer.
+    """
+    from hexton.domain.report_schema import REPORT_OUTCOMES, reporting_state_for
+
+    for state in JobState:
+        value = reporting_state_for(state, video_id="vid-1")
+        assert value in REPORT_OUTCOMES, (state, value)
+    # And the evidence still decides the claim, exactly as it does in a written row.
+    assert reporting_state_for(JobState.PUBLISHED, video_id="vid-1") == "Published"
+    assert reporting_state_for(JobState.PUBLISHED) == "Manual Review"
+    assert reporting_state_for(JobState.SCHEDULED, video_id="vid-1") == ("Uploaded - Not Published")
+    assert reporting_state_for(JobState.NEEDS_REVIEW) == "Manual Review"
+
+
 def test_published_requires_a_persisted_video_id_and_an_observed_public_status(
     ctx, session, reporting, connection, clip
 ) -> None:
@@ -735,6 +758,86 @@ def test_a_missing_credential_says_so_and_sends_nothing(
     assert "nothing was sent to Google" in result.diagnostic
     assert sheets_state.append_calls == 0
     assert sheets_state.read_calls == 0
+
+
+def test_a_token_from_the_store_is_usable_by_the_google_client() -> None:
+    """F-27: the access token string was handed straight to ``build(credentials=)``.
+
+    The credential store holds a token *string*; ``build`` calls
+    ``credentials.authorize(...)`` on whatever it is given. The live Sheets path
+    therefore failed with ``'str' object has no attribute 'authorize'`` on its very
+    first call — an unhandled ``AttributeError`` rather than a classified report
+    error — so real spreadsheet reporting could never have worked at all.
+    """
+    from hexton.connectors.sheets_live import LiveSheetsConnector, _as_google_credentials
+
+    credentials = _as_google_credentials("ya29.a-token")
+    assert credentials.token == "ya29.a-token"
+    # And the constructor no longer stores the raw string.
+    assert LiveSheetsConnector("ya29.a-token")._credentials.token == "ya29.a-token"
+    # An already-built credential object passes through untouched.
+    assert _as_google_credentials(credentials) is credentials
+
+
+def test_an_empty_sheet_credential_is_a_classified_error_not_a_crash() -> None:
+    from hexton.connectors.sheets import SheetError
+    from hexton.connectors.sheets_live import _as_google_credentials
+
+    with pytest.raises(SheetError) as excinfo:
+        _as_google_credentials(None)
+    assert excinfo.value.kind == "expired"
+
+
+def test_a_rotated_refresh_token_is_stored_by_the_reporting_path(
+    ctx, session, sheets_connection, reporting
+) -> None:
+    """F-23: reporting wrote the new access token and dropped the rotated refresh one.
+
+    Google rotates refresh tokens. The platform path has always stored the new one;
+    ``_connector_for`` did not, so the *next* refresh presented a token that no longer
+    existed and the reporting connection was permanently dead until someone
+    reconnected it by hand — while the platform connection beside it kept working,
+    which is the most confusing possible version of that failure.
+    """
+    from hexton.connectors.base import TokenSet
+    from hexton.services.sheets import _connector_for
+
+    key = f"conn:{sheets_connection.public_id}"
+    ctx.credentials.write(f"{key}:access", "")
+    ctx.credentials.write(f"{key}:refresh", "old-refresh")
+
+    def rotate(_refresh: str) -> TokenSet:
+        return TokenSet(access_token="new-access", refresh_token="rotated-refresh", expires_in=3600)
+
+    ctx.connector.refresh = rotate  # type: ignore[method-assign]
+
+    _connector_for(ctx, session, reporting)
+
+    assert ctx.credentials.read(f"{key}:access") == "new-access"
+    assert ctx.credentials.read(f"{key}:refresh") == "rotated-refresh", (
+        "the rotated refresh token must survive, or the connection dies next call"
+    )
+
+
+def test_a_refresh_failure_is_reported_as_a_credential_problem(
+    ctx, session, sheets_connection, reporting
+) -> None:
+    """Nothing reached Google, so the diagnostic must not imply that it did."""
+    from hexton.connectors.base import ConnectorError, FailureKind
+    from hexton.connectors.sheets import SheetsUnconfigured
+    from hexton.services.sheets import _connector_for
+
+    key = f"conn:{sheets_connection.public_id}"
+    ctx.credentials.write(f"{key}:access", "")
+
+    def refuse(_refresh: str):
+        raise ConnectorError("invalid_grant", kind=FailureKind.AUTHORIZATION, retryable=False)
+
+    ctx.connector.refresh = refuse  # type: ignore[method-assign]
+
+    with pytest.raises(SheetsUnconfigured) as excinfo:
+        _connector_for(ctx, session, reporting)
+    assert "Nothing was sent to Google" in str(excinfo.value)
 
 
 def test_an_inaccessible_worksheet_is_classified_not_found(

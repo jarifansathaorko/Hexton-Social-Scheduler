@@ -12,7 +12,7 @@ from hexton.api.deps import SessionDep
 from hexton.api.schemas import MediaAddIn, MediaCheckOut, MediaIssueOut, MediaOut
 from hexton.db import events as ev
 from hexton.db.models import MediaFile, ScheduledJob
-from hexton.media import validate_file, verify_unchanged
+from hexton.media import is_allowed_path, validate_file, verify_unchanged
 
 router = APIRouter(prefix="/api/media", tags=["media"])
 
@@ -23,8 +23,20 @@ def check(payload: MediaAddIn) -> MediaCheckOut:
 
     Nothing is written here: an operator browsing for a clip should not leave a
     half-registered record behind if they change their mind.
+
+    Two fields are withheld for anything that is not a candidate clip. ``POST
+    /api/media/check`` accepts an arbitrary absolute path, so without this it is a
+    content-fingerprint oracle over the whole filesystem: asking it about the session
+    signing key would return that file's SHA-256 and length. Existence and readability
+    are still reported, because "the clip moved" is exactly what this endpoint exists
+    to tell an operator.
     """
     report = validate_file(payload.path)
+    is_clip = report.container is not None or is_allowed_path(report.path)
+    if not report.container:
+        report.sha256 = None
+    if not is_clip:
+        report.size_bytes = 0
     return MediaCheckOut(
         path=report.path,
         exists=report.exists,

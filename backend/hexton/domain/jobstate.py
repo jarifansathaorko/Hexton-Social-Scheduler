@@ -200,8 +200,21 @@ TRANSITIONS: dict[JobState, frozenset[JobState]] = {
     JobState.BLOCKED: frozenset({JobState.QUEUED, JobState.READY, JobState.CANCELLED}),
     JobState.MISSED_WINDOW: frozenset({JobState.QUEUED, JobState.CANCELLED, JobState.NEEDS_REVIEW}),
     #: The only escape from an uncertain outcome is an operator resolving it.
+    #:
+    #: ``QUEUED`` is included and is *not* the same act as adopting a video. Adopting
+    #: says "that upload was mine"; requeueing says "I checked and there was no upload
+    #: at all", which is the only reading under which a second ``videos.insert`` cannot
+    #: duplicate anything. It is deliberately absent from the automatic ladder —
+    #: ``NEEDS_REVIEW`` is reachable only from an ambiguous outcome, so no code path may
+    #: ever pick it — and the API records it as an explicit operator decision.
     JobState.NEEDS_REVIEW: frozenset(
-        {JobState.SCHEDULED, JobState.PUBLISHED, JobState.CANCELLED, JobState.FAILED}
+        {
+            JobState.SCHEDULED,
+            JobState.PUBLISHED,
+            JobState.CANCELLED,
+            JobState.FAILED,
+            JobState.QUEUED,
+        }
     ),
     JobState.CANCELLED: frozenset(),
     JobState.FAILED: frozenset(),

@@ -35,7 +35,13 @@ from sqlalchemy.orm import Session, selectinload
 
 from hexton import quota as quota_mod
 from hexton.bootstrap import AppContext
-from hexton.connectors.base import ConnectorError, ProbeResult, VideoStatus
+from hexton.connectors.base import (
+    ConnectorError,
+    PlatformConnector,
+    ProbeResult,
+    VideoStatus,
+)
+from hexton.credentials.store import CredentialStore
 from hexton.db import events as ev
 from hexton.db.models import (
     PlatformConnection,
@@ -75,6 +81,17 @@ class AuthorizationUnavailable(RuntimeError):
     """No usable credential for the connection. Blocks the job; never retries itself."""
 
 
+class LeaseLost(RuntimeError):
+    """Another worker owns this job now, so we stopped touching it mid-transfer.
+
+    Raised from inside ``on_progress``, which the connector calls between chunks. It
+    unwinds the transfer rather than letting a second process continue inside a
+    resumable session that someone else is also writing to. No state is recorded here:
+    the job is not ours to record against, and the new owner is responsible for
+    reconciling what it finds.
+    """
+
+
 @dataclass(frozen=True)
 class RunResult:
     job_id: int | None
@@ -82,6 +99,99 @@ class RunResult:
     state: str | None
     outcome: str
     detail: str = ""
+
+
+def record_unrefreshable(session: Session, connection: PlatformConnection, now: datetime) -> None:
+    """Start the ``DF-21`` deletion clock when a grant stops refreshing.
+
+    Two things used to be lost here. ``schedule_for_unrefreshable_token`` existed,
+    was tested, and was never called from anywhere — so the 30-calendar-day
+    deadline this policy requires was never written, and whether Authorized Data
+    was deleted in time depended on someone happening to notice the connection had
+    gone stale. And ``last_token_check_ok`` was only ever set to ``True``, so the
+    compliance diagnostic's one remote-failure signal could never fire.
+
+    Recorded in one function rather than on the runner, because the publication sweep
+    discovers dead grants too and must write exactly the same record: two
+    implementations of this clock is how one of them quietly stops running (F-22).
+    """
+    from hexton.compliance.retention import schedule_for_unrefreshable_token
+    from hexton.db.models import DataRetention
+
+    connection.last_token_check_at = now
+    connection.last_token_check_ok = False
+
+    already = session.execute(
+        select(DataRetention).where(
+            DataRetention.subject_type == "connection",
+            DataRetention.subject_id == connection.public_id,
+            DataRetention.purged_at.is_(None),
+        )
+    ).first()
+    if already is not None:
+        # One clock per connection. Restarting it on every attempt would push the
+        # deadline out each time a job was retried, which is how a deletion
+        # obligation quietly becomes permanent.
+        return
+    schedule_for_unrefreshable_token(session, connection, now=now)
+
+
+def resolve_access_token(
+    store: CredentialStore,
+    connector: PlatformConnector,
+    session: Session,
+    connection: PlatformConnection,
+    now: datetime,
+) -> str:
+    """Return a usable access token, refreshing when the stored one is stale.
+
+    Module-level rather than a ``JobRunner`` method because both the upload path and
+    the publication-confirmation sweep need a token, and they used to each have their
+    own: the sweep returned whatever string was stored without ever reading
+    ``token_expires_at``, never refreshed, never stamped ``last_token_check_*``, never
+    charged for the call, and swallowed a refused refresh instead of starting ``DF-21``
+    (F-22). One implementation, one set of rules, one record.
+
+    Raises :class:`AuthorizationUnavailable` when no usable credential exists.
+    """
+    key = f"conn:{connection.public_id}"
+    access = store.read(f"{key}:access")
+    refresh = store.read(f"{key}:refresh")
+
+    fresh = (
+        connection.token_expires_at is not None
+        and connection.token_expires_at > now + timedelta(seconds=60)
+    )
+    if access and fresh:
+        return access
+
+    if not refresh:
+        record_unrefreshable(session, connection, now)
+        raise AuthorizationUnavailable(
+            "No refresh token is stored for this connection. Under a Google Cloud "
+            "consent screen in *Testing* status, refresh tokens expire seven days "
+            "after consent (DF-17), so this is expected to happen; reconnect the "
+            "channel in Settings to continue."
+        )
+
+    try:
+        tokens = connector.refresh(refresh)
+    except ConnectorError as exc:
+        record_unrefreshable(session, connection, now)
+        raise AuthorizationUnavailable(f"The stored credential is no longer valid: {exc}") from exc
+
+    store.write(f"{key}:access", tokens.access_token)
+    if tokens.refresh_token and tokens.refresh_token != refresh:
+        store.write(f"{key}:refresh", tokens.refresh_token)
+    if tokens.expires_in:
+        connection.token_expires_at = now + timedelta(seconds=tokens.expires_in)
+    connection.last_token_check_at = now
+    connection.last_token_check_ok = True
+    if connection.status == "expired":
+        connection.status = "active"
+    session.flush()
+    quota_mod.add_units_on(session, connection.provider, quota_mod.COST_READ, now)
+    return tokens.access_token
 
 
 class JobRunner:
@@ -371,46 +481,25 @@ class JobRunner:
     # ------------------------------------------------------------------
 
     def _access_token(self, session: Session, connection: PlatformConnection, now: datetime) -> str:
-        """Return a usable access token, refreshing when the stored one is stale."""
-        store = self.ctx.credentials
-        key = f"conn:{connection.public_id}"
-        access = store.read(f"{key}:access")
-        refresh = store.read(f"{key}:refresh")
+        """Return a usable access token, refreshing when the stored one is stale.
 
-        fresh = (
-            connection.token_expires_at is not None
-            and connection.token_expires_at > now + timedelta(seconds=60)
+        A thin delegate. The rules live in :func:`resolve_access_token`, which the
+        publication-confirmation sweep shares, so the two paths cannot drift apart
+        again (F-22).
+        """
+        return resolve_access_token(
+            self.ctx.credentials, self.ctx.connector, session, connection, now
         )
-        if access and fresh:
-            return access
 
-        if not refresh:
-            raise AuthorizationUnavailable(
-                "No refresh token is stored for this connection. Under a Google Cloud "
-                "consent screen in *Testing* status, refresh tokens expire seven days "
-                "after consent (DF-17), so this is expected to happen; reconnect the "
-                "channel in Settings to continue."
-            )
+    def _record_unrefreshable(
+        self, session: Session, connection: PlatformConnection, now: datetime
+    ) -> None:
+        """Start the ``DF-21`` deletion clock when a grant stops refreshing.
 
-        try:
-            tokens = self.ctx.connector.refresh(refresh)
-        except ConnectorError as exc:
-            raise AuthorizationUnavailable(
-                f"The stored credential is no longer valid: {exc}"
-            ) from exc
-
-        store.write(f"{key}:access", tokens.access_token)
-        if tokens.refresh_token and tokens.refresh_token != refresh:
-            store.write(f"{key}:refresh", tokens.refresh_token)
-        if tokens.expires_in:
-            connection.token_expires_at = now + timedelta(seconds=tokens.expires_in)
-        connection.last_token_check_at = now
-        connection.last_token_check_ok = True
-        if connection.status == "expired":
-            connection.status = "active"
-        session.flush()
-        quota_mod.add_units_on(session, connection.provider, quota_mod.COST_READ, now)
-        return tokens.access_token
+        Delegates to :func:`record_unrefreshable` for the same reason as
+        :meth:`_access_token`: the sweep writes this clock too.
+        """
+        record_unrefreshable(session, connection, now)
 
     # ------------------------------------------------------------------
     # Reconciliation
@@ -586,7 +675,36 @@ class JobRunner:
         content_type = job.media.container or "video/mp4"
 
         if upload is None or not upload.session_uri:
-            body = self._insert_body(job)
+            if not quota_mod.can_afford_on(
+                session, job.connection.provider, quota_mod.COST_INSERT, now
+            ):
+                # ``RESERVE_UNITS`` exists "so a sweep or a reschedule is never the
+                # thing that exhausts the budget", and the reserve was never consulted
+                # from here — only from the sweep and from ``_push_status``. Spending it
+                # on uploads would starve verification polling, which is the only route
+                # from SCHEDULED to PUBLISHED at all. Gated before the session is
+                # created so no resumable session and no charge exist for a call that
+                # was never made; a transfer already in flight is never interrupted,
+                # because its ``videos.insert`` has already been paid for.
+                job.next_attempt_at = quota_mod.retry_at_reset(now)
+                job.failure_kind = FailureKind.QUOTA.value
+                job.failure_message = (
+                    "The daily quota has no room for another videos.insert without "
+                    "eating the reserve that keeps publication verification running, "
+                    "so nothing was sent. The upload waits for the documented reset."
+                )
+                self._transition(session, job, JobState.FAILED_RETRY, now)
+                ev.record_event(
+                    session,
+                    job_id=job.id,
+                    kind=ev.KIND_RETRY_SCHEDULED,
+                    message="The upload is deferred until the next quota window: the "
+                    "budget is at its reserve and no videos.insert was issued.",
+                    payload={"next_attempt_at": _iso(job.next_attempt_at)},
+                )
+                session.commit()
+                return job.state
+
             upload = UploadSession(
                 job_id=job.id,
                 session_uri="",
@@ -598,7 +716,14 @@ class JobRunner:
             )
             session.add(upload)
             session.flush()
+            # Inside the try. Building the body is not network I/O, but it *can* raise
+            # ``ConnectorError`` when consent refuses a transform the metadata needs,
+            # and it used to sit outside — so a permanent, classifiable failure
+            # travelled up as an unhandled exception instead of being recorded against
+            # the job. The operator saw a job stuck at Uploading and a traceback in a
+            # log, and no retry policy was ever applied.
             try:
+                body = self._insert_body(job)
                 started = self.ctx.connector.start_resumable_upload(
                     access,
                     metadata=body,
@@ -645,6 +770,16 @@ class JobRunner:
                 start_offset=start_offset,
                 on_progress=on_progress,
             )
+        except LeaseLost:
+            # Not ours any more. Nothing is recorded — the new owner will find the
+            # persisted session URI and its offset and reconcile from there, which is
+            # exactly what that row exists for. Writing a state here would be writing
+            # into someone else's lease.
+            log.warning(
+                "Lease lost mid-transfer for job %s; stopping without recording a state.",
+                job.id,
+            )
+            return "lease_lost"
         except ConnectorError as exc:
             with self.ctx.sessions() as fresh:
                 current = _load_job(fresh, job.id)
@@ -925,6 +1060,14 @@ class JobRunner:
         On its own short transaction so a progress write cannot hold the lock the
         worker itself needs, and so a killed process leaves the last reported figure
         rather than an uncommitted one.
+
+        The heartbeat's answer is not decoration. ``False`` means this job is no longer
+        ours — the lease expired and another worker has claimed it — and carrying on
+        would put two processes inside one resumable session at once, which is the
+        duplicate-upload case the whole lease protocol exists to prevent. Raising from
+        the callback is what stops the transfer mid-flight; the connector just calls
+        ``on_progress`` on its way through, so the exception unwinds the transfer with
+        us.
         """
         percent = int(done * 100 / total) if total else 0
         with self.ctx.sessions() as session:
@@ -933,13 +1076,15 @@ class JobRunner:
                 return
             job.progress_percent = max(0, min(100, percent))
             session.commit()
-        heartbeat(
+        held = heartbeat(
             self.ctx.engine,
             job_id=job_id,
             owner=self.owner,
             now=now,
             lease_seconds=self.ctx.settings.lease_seconds,
         )
+        if not held:
+            raise LeaseLost(job_id)
 
 
 # ----------------------------------------------------------------------
@@ -969,11 +1114,20 @@ def remote_state_of(
     if status.privacy_status == "public":
         return RemoteState.PUBLIC.value
     if status.privacy_status == "private":
-        if publish_at is not None and publish_at > now:
+        # Prefer the provider's own ``publishAt``: this function's entire job is to
+        # say what the *remote* record shows, and the local plan is only a fallback
+        # for providers that omit the field.
+        when = status.publish_at or publish_at
+        if when is not None and when > now:
             return RemoteState.SCHEDULED.value
         if status.processing_status == "processing":
             return RemoteState.UPLOADED_PROCESSING.value
-        return RemoteState.SCHEDULED.value
+        # Private with no publication time ahead of it. This used to fall through to
+        # ``SCHEDULED`` as well, which is a publication claim the provider never made:
+        # nothing is going to publish this video, so the dashboard showed "Scheduled"
+        # for a row that would sit there for ever. ``PRIVATE_UNLISTED_OR_OTHER`` says
+        # only what was observed — it is private — and makes no promise about when.
+        return RemoteState.PRIVATE_UNLISTED_OR_OTHER.value
     return RemoteState.PRIVATE_UNLISTED_OR_OTHER.value
 
 

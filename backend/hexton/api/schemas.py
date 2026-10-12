@@ -263,6 +263,13 @@ class JobDetailOut(BaseModel):
     observations: list[ObservationOut]
     upload_sessions: list[UploadSessionOut]
     allowed_transitions: list[str]
+    #: Video IDs an operator may confirm as this job's upload. Empty unless the job is
+    #: actually in doubt, and populated from the reconciliation ladder rather than from
+    #: anything the client supplied.
+    candidates: list[str] = []
+    #: True when re-running the job is a meaningful remaining action, i.e. the outcome
+    #: is uncertain and the operator has not already resolved it.
+    can_requeue: bool = False
 
 
 class EventOut(BaseModel):
@@ -312,6 +319,30 @@ class RescheduleIn(BaseModel):
 class ReconcileIn(BaseModel):
     video_id: str | None = None
 
+    #: What the operator is asserting, independently of which ID they picked.
+    #:
+    #: ``adopt`` — the chosen video is this schedule's publication.
+    #: ``not_uploaded`` — the operator checked and *no* upload exists, so re-running
+    #:   the job cannot duplicate anything. This is the only route back to ``QUEUED``.
+    #: ``cancel`` — the operator gives up on the job; any video that does exist is
+    #:   left untouched rather than deleted.
+    #:
+    #: Kept separate from ``video_id`` because "no video id" is ambiguous between
+    #: "I did not choose" and "there is nothing to choose", and that ambiguity is
+    #: exactly what an uncertain upload outcome must never be resolved by.
+    resolution: str | None = None
+
+
+class ReconcileOut(BaseModel):
+    job: JobOut
+    #: Video IDs an operator may confirm. Only ever surfaced by the ladder — the UI
+    #: offers these and nothing else, so it cannot attribute an unrelated upload by
+    #: typing an ID into a field.
+    candidates: list[str]
+    #: Whether the remaining disposition (``not_uploaded`` / ``cancel``) is meaningful
+    #: here, so a UI does not offer to re-run a job that is already queued.
+    can_requeue: bool
+
 
 # ----------------------------------------------------------------------
 # Settings and dashboard
@@ -327,6 +358,13 @@ class SettingsOut(BaseModel):
     worker_poll_seconds: float
     retention_days: int
     connector_kind: str
+    #: Whether this connector can actually reach YouTube. False means every call either
+    #: simulates (the fake connector) or refuses (the real one is not wired yet), which
+    #: is what makes a "Published" figure on screen evidence of nothing.
+    connector_ready: bool
+    #: ``development`` or ``packaged``. The packaged profile refuses the fake connector
+    #: outright, so this is what the unmissable "cannot publish" banner is keyed on.
+    build_profile: str
     credential_store_kind: str
     data_dir: str
     quota_daily_units: int

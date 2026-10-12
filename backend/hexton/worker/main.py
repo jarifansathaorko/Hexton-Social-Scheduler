@@ -111,14 +111,35 @@ class Worker:
     # ------------------------------------------------------------------
 
     def startup(self, *, now: datetime | None = None) -> list[int]:
-        """Recover from whatever happened while this process was not running."""
+        """Recover from whatever happened while this process was not running.
+
+        Nothing here is allowed to be fatal. Each step is contained separately because
+        they fail for different reasons and for different durations: a lease reclaim is
+        a local write, while retention contacts the credential store. Losing one must
+        not cost the others, and none of them may cost the worker loop — a retention
+        deadline that could not be met has to stop *that purge*, not every scheduled
+        upload on the machine.
+        """
         now = now or datetime.now(UTC)
-        orphans = self.runner.reclaim_orphans(now=now)
-        expire_stale_leases(self.ctx.engine, now=now)
+        try:
+            orphans = self.runner.reclaim_orphans(now=now)
+        except Exception:
+            log.exception("Worker startup: reclaiming interrupted jobs failed; continuing.")
+            orphans = []
+        try:
+            expire_stale_leases(self.ctx.engine, now=now)
+        except Exception:
+            log.exception("Worker startup: expiring stale leases failed; continuing.")
         # Retention runs at startup as well as on a timer, so a machine that was off
         # for a month still closes its deletion deadlines when it comes back
-        # (``DF-20``/``DF-21``).
-        RetentionSweeper(self.ctx).run(now=now)
+        # (``DF-20``/``DF-21``). :meth:`~hexton.compliance.retention.RetentionSweeper.run`
+        # no longer raises for a row it cannot purge, but the guard is here as well
+        # because "no row could be purged" and "the sweeper itself is broken" must not
+        # both end the same way.
+        try:
+            RetentionSweeper(self.ctx).run(now=now)
+        except Exception:
+            log.exception("Worker startup: retention sweep failed; continuing.")
         self._started_at = now
         self._beat(now)
         log.info(
@@ -133,16 +154,31 @@ class Worker:
         force_sweep: bool = False,
         force_report_sync: bool = False,
     ) -> TickReport:
-        """One pass: at most one job, plus the sweeps when they are due."""
+        """One pass: at most one job, plus the sweeps when they are due.
+
+        Every phase is wrapped. ``report_sync`` already was, and the two phases that
+        actually touch a provider were not — so a ``ConnectorError`` that escaped
+        ``_insert_body`` (a metadata failure, which is not a network condition at all)
+        travelled out of ``run_once``, out of ``tick``, and out of ``run_forever``,
+        ending the worker process. The next scheduled upload simply never ran, with a
+        traceback as the only trace.
+        """
         now = now or datetime.now(UTC)
-        result = self.runner.run_once(now=now)
+        result = None
+        try:
+            result = self.runner.run_once(now=now)
+        except Exception:
+            log.exception("Worker: the job runner raised; this pass is skipped.")
         if result is not None:
             self._jobs_claimed += 1
 
         sweep_report: SweepResult | None = None
         due = (time.monotonic() - self._last_sweep) >= self.sweep_interval
         if force_sweep or due:
-            sweep_report = self.sweep.run(now=now)
+            try:
+                sweep_report = self.sweep.run(now=now)
+            except Exception:
+                log.exception("Worker: the publish-confirmation sweep raised; continuing.")
             self._last_sweep = time.monotonic()
 
         # Reporting is a separate, slower cadence: it is not latency-sensitive and every

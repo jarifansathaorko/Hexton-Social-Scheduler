@@ -219,6 +219,15 @@ def enable(connection_id: int, session: Session = SessionDep) -> ConnectionActio
             status_code=409,
             detail="A revoked connection cannot be re-enabled; reauthorize it instead.",
         )
+    if conn.granted_at is None:
+        # Same rule as :func:`hexton.api.routers.connections.enable_connection`. The
+        # two endpoints used to disagree here: this one would flip a never-authorized
+        # connection straight to ``active``, presenting it as connected when no grant
+        # and no credential ever existed.
+        raise HTTPException(
+            status_code=409,
+            detail="This connection has never been authorized. Authorize it first.",
+        )
     conn.status = "active"
     conn.disabled_at = None
     session.commit()
@@ -278,20 +287,34 @@ def revoke(
 
 
 @router.get("/connections/{connection_id}/diagnostic", response_model=DiagnosticOut)
-def diagnostic(connection_id: int, session: Session = SessionDep) -> DiagnosticOut:
+def diagnostic(
+    connection_id: int,
+    session: Session = SessionDep,
+    ctx: AppContext = CtxDep,
+) -> DiagnosticOut:
     """Distinguish "no credential" from "the request failed" (``COMP-10``).
 
     These send the operator to completely different fixes. Conflating them — which the
     Phase 2 review found happening in user-facing text — sends them to reauthorize when
     the real problem is a network blip, and they come away believing they fixed it.
+
+    ``credential_present`` is read from the **credential store**, not inferred from the
+    row's status. A connection can be marked active while its token has already been
+    deleted — by a partial revoke, by a purge, or by a manual clear of the store — and
+    reporting "Connected and reachable." in that state is exactly the misdiagnosis
+    ``COMP-10`` exists to prevent.
     """
     conn = _load(session, connection_id)
     acceptance = _latest_acceptance(session)
+    key = f"conn:{conn.public_id}"
+    credential_present = any(
+        ctx.credentials.read(f"{key}:{name}") for name in ("access", "refresh")
+    )
     result = diagnose(
         connected=conn.granted_at is not None,
         policy_accepted=bool(acceptance and acceptance.version == PRIVACY_POLICY_VERSION),
         enabled=conn.status == "active",
-        credential_present=conn.status not in ("revoked",),
+        credential_present=credential_present,
         credential_expired=conn.status == "expired",
         remote_error="" if conn.last_token_check_ok is not False else "the last token check failed",
     )

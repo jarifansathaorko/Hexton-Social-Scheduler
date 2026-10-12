@@ -55,6 +55,26 @@ def job_to_out(job: ScheduledJob, zone: ZoneInfo, *, now: datetime | None = None
         # observed" — not "scheduled", and certainly not "published".
         remote_state = RemoteState.UPLOADED_PROCESSING.value
 
+    if state is JobState.PUBLISHED and remote_state != RemoteState.PUBLIC.value:
+        # ``RemoteObservation`` rows are pruned after ``retention_days``
+        # (``compliance.retention._prune_evidence``), so ninety days after a video
+        # published the confirming observation is gone while the job row remains.
+        # ``published_at_remote`` is written at the same instant as the PUBLISHED
+        # transition and is *not* pruned, so it is the surviving record of the same
+        # evidence.
+        if job.published_at_remote is not None:
+            remote_state = RemoteState.PUBLIC.value
+            privacy = privacy or "public"
+        else:
+            # No observation and no persisted publication time. The state column says
+            # PUBLISHED but nothing backs it, so this row may not be rendered as
+            # "Published (verified)" — that is precisely the false publication claim
+            # ``03`` §7.2 forbids. Render it as the unresolved record it is instead of
+            # raising, because one unreadable row must not take the whole list
+            # endpoint down.
+            state = JobState.NEEDS_REVIEW
+            remote_state = RemoteState.UNKNOWN.value
+
     publish_at = job.schedule.publish_at_utc
     poll = PollResult(job.poll_result) if job.poll_result else PollResult.NEVER_POLLED
     publish_passed = bool(publish_at and ensure_utc(publish_at) <= now)

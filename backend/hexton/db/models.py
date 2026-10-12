@@ -91,7 +91,17 @@ class PlatformConnection(Base, TimestampMixin):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)  # "youtube" | "sheets"
     label: Mapped[str] = mapped_column(String(128), nullable=False)
 
-    #: "active" | "disabled" | "revoked" | "expired"
+    #: Every value this application ever writes to ``status``, so a reader does not have
+    #: to grep for them:
+    #:
+    #: ``disconnected`` (registered, no credential yet) · ``active`` · ``disabled``
+    #: (``COMP-07``: stops Hexton using it, erases nothing) · ``revoked`` (credential
+    #: deleted, ``D-1`` clock running) · ``expired`` (refresh token unusable, ``DF-21``
+    #: clock running) · ``deleted`` (Authorized Data confirmed purged).
+    #:
+    #: The column default stays ``"active"`` because seeds and fixtures build a
+    #: connection that is already authorized; ``create_connection`` is what writes
+    #: ``disconnected``.
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
 
     #: ``COMP-07``: disabling is **not** revoking. Disabling stops Hexton using the

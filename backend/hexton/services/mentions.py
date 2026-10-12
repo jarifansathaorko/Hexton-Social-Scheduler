@@ -14,7 +14,9 @@ the ones most likely to be eroded:
 2. **Text is never evidence.** An ``@handle`` in a description is characters. It moves a
    mention *towards* "manual required", never towards "verified", and the label says so.
 3. **A rewrite can destroy it, so a rewrite must be decided.** :func:`rewrite_risk` is
-   consulted before any metadata update, and its answer is a blocking one.
+   the decision function, and :func:`hexton.services.jobs.may_issue_snippet_update` is
+   the gate every ``videos.update`` now passes through. The gate is blocking: when no
+   update is permitted, no request goes to Google.
 
 No private endpoint, no cookie extraction, no browser automation. The operator, in
 YouTube Studio, by hand — this module only keeps the ledger.
@@ -299,10 +301,20 @@ def rewrite_risk(
 ) -> RemovalRisk:
     """Whether changing this job's description risks the operator's manual mention.
 
-    Consulted by the API before any metadata update, and by the worker before it
-    re-asserts a snippet. Both must respect the answer: ``requires_decision`` means the
-    operator has to say, explicitly, that they accept losing the mention — a default of
-    "yes" would silently destroy work the API cannot even detect.
+    There is deliberately no call site for it in this build, and that is a fact about
+    the application rather than an omission. Content is frozen the moment bytes leave
+    this machine (``EDITABLE_STATES``), so no code path here ever rewrites a
+    description that has already been uploaded — the two ``videos.update`` sites send
+    Hexton's own snippet back unchanged, and
+    :func:`hexton.services.jobs.may_issue_snippet_update` is the gate they consult.
+    Wiring this in as a "just in case" guard would refuse every local draft that
+    requested a mention, on the strength of a video that does not exist yet.
+
+    It stays because it is the honest answer to a real question and because the
+    Phase 0 pin it encodes (``D-6``, ``AC-MVP-009``) says a decision must be explicit:
+    ``requires_decision`` means a human has to say they accept losing the mention — a
+    default of "yes" would silently destroy work the API cannot even detect. Should a
+    post-upload metadata editor ever be built, this is what it must consult first.
     """
     state = current_state(job)
     new_text_handles = extract_handles(new_description or "")

@@ -391,6 +391,21 @@ export interface JobDetail {
   observations: Observation[];
   upload_sessions: UploadSession[];
   allowed_transitions: string[];
+  /**
+   * Video IDs an operator may confirm as this job's upload.
+   *
+   * Empty unless the job is genuinely in doubt, and supplied by the backend's
+   * reconciliation ladder rather than by anything the client typed. This is what makes
+   * the ambiguous case reachable at all: when a `videos.insert` outcome is unknown the
+   * job's own `video_id` is null, so a panel that only offered "this video is mine"
+   * against `job.video_id` offered no way to adopt anything (F-04).
+   */
+  candidates: string[];
+  /**
+   * True when re-running the job is a meaningful remaining action: the outcome is
+   * uncertain and the operator has not already resolved it (F-04).
+   */
+  can_requeue: boolean;
 }
 
 export interface JobList {
@@ -449,6 +464,8 @@ export interface Settings {
   worker_poll_seconds: number;
   retention_days: number;
   connector_kind: string;
+  connector_ready: boolean;
+  build_profile: string;
   credential_store_kind: string;
   data_dir: string;
   quota_daily_units: number;

@@ -84,6 +84,8 @@ class FakeConnector(PlatformConnector):
     """A stand-in with the same contract as the real connector."""
 
     provider = "fake"
+    #: It simulates. Nothing it reports has happened anywhere, and the UI says so.
+    reaches_platform = False
 
     def __init__(self, state: FakeState | None = None) -> None:
         self.state = state if state is not None else FakeState()

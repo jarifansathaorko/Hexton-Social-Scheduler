@@ -37,16 +37,40 @@ def _context(*, packaged: bool | None = None) -> AppContext:
     return build_context(settings, profile=profile)
 
 
+def _in_source_checkout() -> bool:
+    """True when this code is running from a source tree rather than an installation.
+
+    ``pyproject.toml`` sits directly beside the package in a checkout and cannot sit
+    beside it in a wheel install, where ``hexton`` is placed in ``site-packages``. That
+    makes it a marker of *how the code arrived on disk*, which is the question the build
+    profile answers — unlike an environment variable, which a misconfiguration can set,
+    and unlike a marker file, which nothing had ever written.
+
+    An editable install still counts as a checkout, and correctly so: the code being run
+    is the developer's working tree.
+    """
+    return (BACKEND_ROOT / "pyproject.toml").is_file()
+
+
 def _profile(settings: Settings) -> BuildProfile:
     """How this process was launched.
 
     A packaged build is one where the application was installed rather than run from a
-    checkout. That is what refuses the fake connector and the plaintext credential
-    store, so it is determined by a marker written at install time rather than by an
-    environment variable a misconfiguration could set.
+    checkout, and it is the profile that refuses the fake connector and the plaintext
+    credential store. This used to be decided solely by a marker under ``data_dir`` that
+    no code ever created, so ``BuildProfile.PACKAGED`` was unreachable and every guard
+    keyed on it — the fake-connector refusal, the plaintext-store refusal, and
+    ``attach-test-credential`` — was dead code. A default install therefore reported
+    published figures for uploads that could only ever have been simulated.
+
+    Now: an installer may still write the marker to force the packaged profile, but its
+    absence no longer implies "development". Absence means "not installed from a
+    checkout", which is what an installation is.
     """
     marker = settings.data_dir / "packaged"
-    return BuildProfile.PACKAGED if marker.exists() else BuildProfile.DEVELOPMENT
+    if marker.exists():
+        return BuildProfile.PACKAGED
+    return BuildProfile.DEVELOPMENT if _in_source_checkout() else BuildProfile.PACKAGED
 
 
 # ----------------------------------------------------------------------

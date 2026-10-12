@@ -196,7 +196,15 @@ class CredentialManagerStore(CredentialStore):
 
 
 class DpapiFileStore(CredentialStore):
-    """A DPAPI-protected JSON blob, scoped to the current Windows user."""
+    """A DPAPI-protected JSON blob, scoped to the current Windows user.
+
+    The bytes, not the file mode, are the control. ``CryptProtectData`` with
+    ``CRYPTPROTECT_LOCAL_MACHINE`` unset binds every stored secret to the Windows
+    account that wrote it, so a copy of the file is inert on any other machine or for
+    any other account — including an administrator's. The ``os.chmod(..., 0o600)`` calls
+    are kept because they are correct on POSIX and harmless here, but on Windows they
+    only toggle the read-only bit and do not produce a user-only ACL (``F-25``).
+    """
 
     name = "dpapi_file"
     production_safe = True
@@ -347,6 +355,16 @@ def select_credential_store(
     ``kind`` comes from process configuration, not from a runtime flag threaded
     through business logic, so production code paths cannot accidentally reach a
     weaker store.
+
+    An *explicit* ``kind`` is honoured or refused, never downgraded. This function used
+    to understand only ``in_memory`` and ``plaintext`` and then fall through to the
+    ``auto`` ladder — so both names ``config.py`` documents,
+    ``windows_credential_manager`` and ``dpapi_file``, silently produced Credential
+    Manager. An operator who asked for a file they could see, audit and delete got a
+    Credential Manager entry they could not, with no error and no log line, and the only
+    other ``production_safe`` store was unreachable by configuration at all. Silently
+    answering a different question than the one that was asked is the failure mode this
+    function exists to prevent, so an unrecognised ``kind`` now refuses outright.
     """
     if kind == "in_memory":
         return InMemoryCredentialStore()
@@ -361,6 +379,28 @@ def select_credential_store(
                 "packaged build."
             )
         return PlaintextStore((data_dir or Path(".")) / "credentials.json")
+
+    if kind == "dpapi_file":
+        if data_dir is None:
+            raise CredentialStoreError(
+                "The dpapi_file credential store was requested but no data directory "
+                "was configured, so there is nowhere to put the file. Refusing rather "
+                "than falling back to a different store than the one that was asked "
+                "for."
+            )
+        return DpapiFileStore(data_dir / "credentials.dpapi")
+
+    if kind == "windows_credential_manager":
+        # No fallback: if the Credential Manager is unavailable this raises, which is
+        # the point. Reaching for DPAPI here would repeat the F-24 substitution.
+        return CredentialManagerStore()
+
+    if kind != "auto":
+        raise CredentialStoreError(
+            f"Unknown credential store kind {kind!r}. Accepted values are 'auto' "
+            "(the Windows Credential Manager, then a DPAPI file, then refuse), "
+            "'windows_credential_manager', 'dpapi_file', 'in_memory' and 'plaintext'."
+        )
 
     if IS_WINDOWS:
         try:

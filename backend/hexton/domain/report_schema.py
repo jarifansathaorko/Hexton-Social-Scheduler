@@ -10,7 +10,7 @@ the single definition of them, and it carries the two constraints that matter:
 
 2. **A row may not claim a state the system has not evidenced.** ``Upload Outcome`` is
    derived from ``JobState``, and the only way a job reaches ``PUBLISHED`` is a persisted
-   video ID plus verified remote evidence. ``reporting_state_for`` is the single mapping
+   video ID plus verified remote evidence. ``upload_outcome`` is the single mapping
    from local state to the reporting vocabulary, so there is exactly one place where a
    report says what happened.
 
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from ..connectors.sheets import KEY_COLUMN, OPTIONAL_COLUMNS, REQUIRED_COLUMNS, SHEET_COLUMNS
-from .jobstate import JobState, RemoteState, display_for
+from .jobstate import JobState, RemoteState
 
 #: Bumped when the column layout or the meaning of a value changes. It is part of the
 #: Sync Key, so a schema change starts a new identity series rather than colliding with
@@ -119,9 +119,23 @@ def upload_outcome(
     return "Pending"
 
 
-def reporting_state_for(state: JobState) -> str:
-    """The single internal-state-to-report mapping. Mirrors ``display_for`` exactly."""
-    return display_for(state)
+def reporting_state_for(
+    state: JobState,
+    *,
+    video_id: str | None = None,
+    remote_state: RemoteState | None = None,
+) -> str:
+    """Report vocabulary for a local state. Delegates; there is one mapping.
+
+    This used to call ``display_for(state)`` with the defaults, which meant
+    ``RemoteState.UNKNOWN`` — and ``display_for`` raises for exactly that combination
+    on a ``PUBLISHED`` row, because the UI must not render an unverified publication.
+    A *report* is not a UI: its job is to record what is known, and refusing to write
+    the row would leave the reconciliation record missing for the one job it matters
+    most to reconcile. So it now goes through :func:`upload_outcome`, which asks the
+    same evidentiary question and answers it instead of raising.
+    """
+    return upload_outcome(state, video_id=video_id, remote_state=remote_state)
 
 
 def observed_status(remote_state: RemoteState | None) -> str:

@@ -28,8 +28,8 @@ from hexton.bootstrap import AppContext
 from hexton.compliance.policy import (
     PRIVACY_POLICY_VERSION,
     PolicyAcceptance,
-    require_gate,
 )
+from hexton.connectors.base import ConnectorError
 from hexton.connectors.sheets import (
     KEY_COLUMN,
     OPTIONAL_COLUMNS,
@@ -83,14 +83,11 @@ class SheetsConfigError(RuntimeError):
         self.code = code
 
 
-class SheetsSyncError(RuntimeError):
-    """A sync could not be performed at all. Distinct from a *failed row*."""
-
-    def __init__(self, message: str, *, code: str = "sync_failed", diagnostic: str = "") -> None:
-        super().__init__(message)
-        self.code = code
-        #: ``compliance.policy.diagnose`` output, so the UI can say *why* in operator terms.
-        self.diagnostic = diagnostic
+# ``SheetsSyncError`` was declared here — "a sync could not be performed at all,
+# distinct from a *failed row*" — and then never raised. Every whole-sync failure
+# already travels as ``SyncSummary.ok == False`` with a ``diagnostic`` attached, which
+# is what the UI and the tests read, so the class had no caller and no test. A second
+# unused route to the same idea is how the two eventually disagree.
 
 
 # ==========================================================================
@@ -318,8 +315,25 @@ def _connector_for(ctx: AppContext, session: Session, config: SheetsConfig):
                 "No credential is stored for the reporting connection. This is a "
                 "missing credential, not a remote failure — nothing was sent to Google."
             )
-        tokens = ctx.connector.refresh(refresh)
+        try:
+            tokens = ctx.connector.refresh(refresh)
+        except ConnectorError as exc:
+            # Also a credential problem rather than a Sheets failure: the destination
+            # was never contacted, so the diagnostic must say so. Deliberately not
+            # ``except Exception`` — a programming error here should not be reported
+            # to an operator as "your credential expired".
+            raise SheetsUnconfigured(
+                f"The stored credential for the reporting connection is no longer "
+                f"usable: {exc}. Nothing was sent to Google; reconnect it in Settings."
+            ) from exc
         ctx.credentials.write(f"{key}:access", tokens.access_token)
+        # A rotated refresh token used to be discarded here, and only here — the
+        # platform path has always stored it. Google rotates refresh tokens, so the
+        # next call would have presented a token that no longer exists, taken the
+        # connection down permanently, and left reporting broken until someone
+        # reconnected it by hand.
+        if tokens.refresh_token and tokens.refresh_token != refresh:
+            ctx.credentials.write(f"{key}:refresh", tokens.refresh_token)
         access = tokens.access_token
     return ctx.sheets(access)
 
@@ -1069,7 +1083,6 @@ __all__ = [
     "SUMMARY_BUCKETS",
     "PolicyAcceptance",
     "SheetsConfigError",
-    "SheetsSyncError",
     "SyncSummary",
     "active_columns",
     "build_row",
@@ -1086,7 +1099,6 @@ __all__ = [
     "reconciliation_limits",
     "report_date_for",
     "report_date_of_job",
-    "require_gate",
     "summarise_day",
     "sync_once",
     "test_write",

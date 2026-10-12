@@ -19,9 +19,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session, selectinload
 
 from hexton.bootstrap import AppContext
+from hexton.db import events as ev
 from hexton.db.models import (
     ChannelIdentity,
     DataRetention,
@@ -49,42 +51,108 @@ class RetentionSweeper:
         self.ctx = ctx
 
     def run(self, *, now: datetime | None = None) -> PurgeReport:
+        """Apply every deadline that has passed.
+
+        Each overdue row is purged in its **own** transaction, and no failure escapes.
+        This runs inside :meth:`hexton.worker.main.Worker.startup`, where an exception
+        stopped the worker from starting at all — one overdue deadline would have
+        silenced *every* scheduled upload, a far worse outcome than a sweep that fails
+        one row and retries it next time. One shared transaction had the same problem in
+        miniature: a rollback for row *n* silently undid rows *1..n-1*.
+        """
         now = now or datetime.now(UTC)
         with self.ctx.sessions() as session:
-            overdue = list(
-                session.execute(
+            overdue = [
+                row.id
+                for row in session.execute(
                     select(DataRetention).where(
                         DataRetention.purged_at.is_(None), DataRetention.deadline <= now
                     )
-                ).scalars()
-            )
-            purged = 0
-            for row in overdue:
-                purged += self._purge_connection(session, row, now)
-                row.purged_at = now
-                row.purge_note = "Purged automatically after the retention deadline."
-            events, observations = self._prune_evidence(session, now)
-            session.commit()
+                )
+                .scalars()
+                .all()
+            ]
+
+        purged = failures = 0
+        for retention_id in overdue:
+            try:
+                with self.ctx.sessions() as session:
+                    row = session.get(DataRetention, retention_id)
+                    if row is None or row.purged_at is not None:
+                        continue
+                    purged += self._purge_connection(session, row, now)
+                    row.purged_at = now
+                    row.purge_note = "Purged automatically after the retention deadline."
+                    session.commit()
+            except SQLAlchemyError:
+                failures += 1
+                log.exception(
+                    "Retention: could not purge retention row %s; the deadline stays "
+                    "open so it is retried rather than marked done.",
+                    retention_id,
+                )
+
+        with self.ctx.sessions() as session:
+            try:
+                events, observations = self._prune_evidence(session, now)
+                session.commit()
+            except SQLAlchemyError:
+                failures += 1
+                log.exception("Retention: could not prune old evidence.")
+                session.rollback()
+                events = observations = 0
+
         if overdue:
             log.warning(
-                "Retention: purged %d connection(s) past deadline and pruned %d "
-                "event(s) / %d observation(s).",
+                "Retention: purged %d of %d overdue connection(s) and pruned %d "
+                "event(s) / %d observation(s)%s.",
                 purged,
+                len(overdue),
                 events,
                 observations,
+                f"; {failures} step(s) failed and will be retried" if failures else "",
             )
-        return PurgeReport(purged, len(overdue), events, observations)
+        return PurgeReport(purged, len(overdue) - failures, events, observations)
 
     def _purge_connection(self, session: Session, row: DataRetention, now: datetime) -> int:
         """Delete everything derived from an authorization whose clock has run out."""
         conn = session.execute(
-            select(PlatformConnection).where(PlatformConnection.public_id == row.subject_id)
+            select(PlatformConnection)
+            .where(PlatformConnection.public_id == row.subject_id)
+            .options(selectinload(PlatformConnection.identities))
         ).scalar_one_or_none()
         if conn is None:
             return 0
 
         for name in ("access", "refresh"):
             self.ctx.credentials.delete(f"conn:{conn.public_id}:{name}")
+
+        # Detach first. ``scheduled_job.channel_identity_id`` is ``ondelete="RESTRICT"``,
+        # so deleting an identity that a job still points at raised ``IntegrityError``
+        # and — because this ran unguarded in ``Worker.startup`` — took the whole worker
+        # down seven days after any revocation that had jobs behind it. The job keeps
+        # its history; it simply no longer has a target channel, which is the honest
+        # consequence of the channel's Authorized Data being deleted (``COMP-04``).
+        identity_ids = [i.id for i in conn.identities]
+        if identity_ids:
+            for job in (
+                session.execute(
+                    select(ScheduledJob).where(ScheduledJob.channel_identity_id.in_(identity_ids))
+                )
+                .scalars()
+                .all()
+            ):
+                ev.record_event(
+                    session,
+                    job_id=job.id,
+                    kind=ev.KIND_OBSERVATION,
+                    message="The target channel's Authorized Data was deleted after the "
+                    "retention deadline (COMP-04), so this job no longer names a "
+                    "channel. The upload history is unchanged.",
+                    payload={"reason": "retention_purge"},
+                )
+                job.channel_identity_id = None
+            session.flush()
 
         for identity in list(conn.identities):
             session.delete(identity)
@@ -215,19 +283,24 @@ def delete_everything_for_connection(
     """
     for name in ("access", "refresh"):
         ctx.credentials.delete(f"conn:{connection.public_id}:{name}")
-    for identity in list(connection.identities):
-        session.delete(identity)
     jobs = (
         session.execute(select(ScheduledJob).where(ScheduledJob.connection_id == connection.id))
         .scalars()
         .all()
     )
+    # Jobs first: ``scheduled_job.channel_identity_id`` is ``ondelete="RESTRICT"``, so
+    # an identity that a job still references cannot be deleted. Reliance on flush
+    # ordering here is what made the scheduled-purge path fail (see
+    # :meth:`RetentionSweeper._purge_connection`); the order is stated explicitly.
     for job in jobs:
         for observation in list(job.observations):
             session.delete(observation)
         for event in list(job.events):
             session.delete(event)
         session.delete(job)
+    for identity in list(connection.identities):
+        session.delete(identity)
+    session.flush()
     connection.status = "deleted"
     connection.scopes = []
     connection.label = f"deleted:{connection.public_id[:8]}"

@@ -12,7 +12,7 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from conftest import BASE, FUTURE, make_media
+from conftest import BASE, FUTURE, PAST, make_media
 from fastapi.testclient import TestClient
 from hexton.api.app import create_app
 from hexton.api.security import COOKIE_SECURE, CSRF_HEADER, SessionSigner
@@ -328,6 +328,51 @@ def test_validating_does_not_persist_anything(client, auth, ids) -> None:
     assert listing["total"] == 0
 
 
+def test_a_past_publication_time_always_surfaces_beside_the_other_schedule_issues(
+    client, auth, ids
+) -> None:
+    """F-28: ``validate`` ran ``check_publish_time`` a second time, behind ``if not schedule``.
+
+    ``prepare`` already runs exactly that check, with a superset of the parameters, as
+    part of building ``schedule_issues`` — so the second call could only ever duplicate
+    or, once someone edited one site and not the other, *disagree with* the first. The
+    property worth pinning is the one the suppression threatened: a past publication
+    time is a ``DF-04`` hard block and must be reported whatever else is wrong with the
+    request, exactly once.
+    """
+    response = client.post(
+        "/api/jobs/validate",
+        json=job_payload(
+            ids,
+            publish_at_utc=PAST.isoformat(),
+            display_timezone="Mars/Olympus_Mons",
+            privacy="public",
+        ),
+        headers=auth,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    codes = [i["code"] for i in body["schedule_issues"]]
+    assert "publish_at_in_past" in codes, "the DF-04 block must not be suppressed"
+    assert "unknown_timezone" in codes
+    assert "public_conflicts_with_publish_at" in codes
+    assert len(codes) == len(set(codes)), "one check, one report"
+    assert {i["severity"] for i in body["schedule_issues"]} == {"error"}
+    assert body["ok"] is False
+
+
+def test_a_valid_time_still_validates_clean_against_the_same_check(client, auth, ids) -> None:
+    response = client.post(
+        "/api/jobs/validate",
+        json=job_payload(ids, publish_at_utc=FUTURE.isoformat()),
+        headers=auth,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert [i for i in body["schedule_issues"] if i["severity"] == "error"] == []
+
+
 def test_the_list_carries_everything_the_queue_screen_needs(client, auth, ids) -> None:
     """Phase 2 §7: video, times, local state, remote state, errors, retry, ID/URL."""
     created = client.post(
@@ -370,6 +415,42 @@ def test_search_and_state_filter_narrow_the_list(client, auth, ids) -> None:
     assert filtered["total"] == 2
     assert filtered["states"]["JOB-DRAFT"] == 2
     assert client.get("/api/jobs?state=JOB-PUBLISHED", headers=auth).json()["total"] == 0
+
+
+def test_the_list_pages_in_the_database_and_still_reports_the_filtered_total(
+    client, auth, ids
+) -> None:
+    """F-20: every job was loaded with all seven relationships, then sorted in Python.
+
+    Ordering, offset, and limit now happen in SQL. What must not move is the contract
+    the queue screen depends on: ``total`` counts the jobs that *match*, not the jobs on
+    this page, and the newest job comes first.
+    """
+    created = [
+        client.post("/api/jobs", json=job_payload(ids, title=f"Job {n}"), headers=auth).json()["id"]
+        for n in range(5)
+    ]
+    newest_first = list(reversed(created))
+
+    first = client.get("/api/jobs?limit=2", headers=auth).json()
+    assert first["total"] == 5, "total is the match count, not the page size"
+    assert [j["id"] for j in first["items"]] == newest_first[:2]
+
+    second = client.get("/api/jobs?limit=2&offset=2", headers=auth).json()
+    assert second["total"] == 5
+    assert [j["id"] for j in second["items"]] == newest_first[2:4]
+
+    third = client.get("/api/jobs?limit=2&offset=4", headers=auth).json()
+    assert [j["id"] for j in third["items"]] == newest_first[4:]
+
+    past_the_end = client.get("/api/jobs?limit=2&offset=99", headers=auth).json()
+    assert past_the_end["items"] == []
+    assert past_the_end["total"] == 5
+
+    # A filter narrows ``total`` too — the count is taken from the filtered statement.
+    narrowed = client.get("/api/jobs?q=Job 3&limit=1", headers=auth).json()
+    assert narrowed["total"] == 1
+    assert narrowed["items"][0]["id"] == created[3]
 
 
 def test_queueing_a_draft_makes_it_claimable(client, auth, ids) -> None:
@@ -510,10 +591,12 @@ def test_reconcile_records_the_operators_decision_as_attestation(
     ctx.connector.state.recent_upload_ids = ["vid-mine"]
 
     response = client.post(
-        f"/api/jobs/{job_id}/reconcile", json={"video_id": "vid-mine"}, headers=auth
+        f"/api/jobs/{job_id}/reconcile",
+        json={"video_id": "vid-mine", "resolution": "adopt"},
+        headers=auth,
     )
     assert response.status_code == 200
-    body = response.json()
+    body = response.json()["job"]
     assert body["video_id"] == "vid-mine"
     assert body["state"] in ("JOB-UPLOADED", "JOB-SCHEDULED")
     assert body["insert_may_have_succeeded"] is False
@@ -521,6 +604,7 @@ def test_reconcile_records_the_operators_decision_as_attestation(
     events = client.get(f"/api/jobs/{job_id}/events", headers=auth).json()
     reconciled = [e for e in events if e["kind"] == "reconciled"]
     assert reconciled and reconciled[0]["payload"]["operator_confirmed"] is True
+    assert reconciled[0]["payload"]["resolution"] == "adopt"
 
 
 def test_reconcile_is_offered_only_where_the_outcome_is_uncertain(client, auth, ids) -> None:
@@ -535,11 +619,150 @@ def test_declining_every_candidate_cancels_and_touches_nothing(
 ) -> None:
     job_id = _ambiguous(ctx, session, new_job)
 
-    response = client.post(f"/api/jobs/{job_id}/reconcile", json={}, headers=auth)
+    response = client.post(
+        f"/api/jobs/{job_id}/reconcile", json={"resolution": "cancel"}, headers=auth
+    )
     assert response.status_code == 200
-    assert response.json()["state"] == "JOB-CANCELLED"
+    assert response.json()["job"]["state"] == "JOB-CANCELLED"
     messages = [e["message"] for e in client.get(f"/api/jobs/{job_id}/events", headers=auth).json()]
     assert any("must be checked by hand" in m for m in messages)
+
+
+def test_an_ambiguous_job_can_be_re_run_when_the_operator_says_nothing_was_uploaded(
+    client, auth, ctx, session, new_job
+) -> None:
+    """F-04: ``NEEDS_REVIEW`` had no exit back to the queue.
+
+    Choosing no video always meant "cancel", so an operator who had checked YouTube,
+    found no upload, and wanted the job to run again had to destroy the record and
+    rebuild it — losing the schedule, the media reference and the audit trail. The only
+    surviving route back was editing the state column by hand.
+    """
+    job_id = _ambiguous(ctx, session, new_job)
+
+    detail = client.get(f"/api/jobs/{job_id}", headers=auth).json()
+    assert detail["can_requeue"] is True, "the detail view has to offer the action"
+    assert detail["candidates"] == [], "no candidates exist for this job"
+
+    response = client.post(
+        f"/api/jobs/{job_id}/reconcile",
+        json={"resolution": "not_uploaded"},
+        headers=auth,
+    )
+    assert response.status_code == 200
+    body = response.json()["job"]
+    assert body["state"] == "JOB-QUEUED"
+    assert body["insert_may_have_succeeded"] is False
+
+    events = client.get(f"/api/jobs/{job_id}/events", headers=auth).json()
+    reconciled = [e for e in events if e["kind"] == "reconciled"]
+    assert reconciled, "the decision is recorded as an operator assertion, not silently applied"
+    assert reconciled[0]["payload"]["resolution"] == "not_uploaded"
+    assert "recorded human decision" in reconciled[0]["message"]
+
+    # And it genuinely re-enters the queue rather than merely changing a label.
+    assert client.get(f"/api/jobs/{job_id}", headers=auth).json()["job"]["state"] == "JOB-QUEUED"
+
+
+def test_the_detail_view_surfaces_the_candidates_the_ladder_found(
+    client, auth, ctx, session, new_job
+) -> None:
+    """F-04: candidates only ever appeared inside an event payload.
+
+    The one control that resolves a duplicate-risk situation was reachable by paging
+    through raw JSON out of an audit record. The list belongs next to the buttons it
+    feeds, it comes from the ladder rather than from anything the client supplies, and
+    it empties the moment the uncertainty is resolved so a stale set of options cannot
+    be clicked after the decision has already been made.
+    """
+    job_id = _ambiguous(ctx, session, new_job)
+    ctx.connector.state.recent_upload_ids = ["vid-mine", "vid-other"]
+
+    detail = client.get(f"/api/jobs/{job_id}", headers=auth).json()
+    assert detail["candidates"] == ["vid-mine", "vid-other"]
+    assert detail["can_requeue"] is True
+
+    adopted = client.post(
+        f"/api/jobs/{job_id}/reconcile",
+        json={"video_id": "vid-mine", "resolution": "adopt"},
+        headers=auth,
+    )
+    assert adopted.status_code == 200
+
+    resolved = client.get(f"/api/jobs/{job_id}", headers=auth).json()
+    assert resolved["candidates"] == [], "the decision is made; nothing is left to choose"
+    assert resolved["can_requeue"] is False, "re-running an adopted upload is a duplicate risk"
+
+
+def test_a_video_id_may_not_be_sent_with_a_non_adopt_resolution(
+    client, auth, ctx, session, new_job
+) -> None:
+    """The two fields express different things and must not be quietly combined."""
+    job_id = _ambiguous(ctx, session, new_job)
+
+    response = client.post(
+        f"/api/jobs/{job_id}/reconcile",
+        json={"video_id": "vid-mine", "resolution": "not_uploaded"},
+        headers=auth,
+    )
+    assert response.status_code == 422
+    assert "resolution='adopt'" in response.json()["detail"]
+
+
+def test_adopting_without_a_video_id_is_refused(client, auth, ctx, session, new_job) -> None:
+    job_id = _ambiguous(ctx, session, new_job)
+
+    response = client.post(
+        f"/api/jobs/{job_id}/reconcile", json={"resolution": "adopt"}, headers=auth
+    )
+    assert response.status_code == 422
+    assert "not_uploaded" in response.json()["detail"]
+
+
+def test_requeueing_is_not_a_way_to_re_run_an_in_flight_job(
+    client, auth, ctx, session, new_job
+) -> None:
+    """The transition table is the guard: only ``NEEDS_REVIEW`` may go back to ``QUEUED``.
+
+    Without this, ``resolution='not_uploaded'`` would be a general-purpose "run anything
+    again" button — including a job already mid-transfer, which is precisely the blind
+    re-upload ``DF-12`` forbids.
+    """
+    from hexton.domain.jobstate import JobState, can_transition
+
+    assert can_transition(JobState.NEEDS_REVIEW, JobState.QUEUED)
+    for state in (
+        JobState.UPLOADING,
+        JobState.UPLOADED,
+        JobState.SCHEDULED,
+        JobState.PUBLISHED,
+        JobState.QUEUED,
+    ):
+        assert not can_transition(state, JobState.QUEUED), state
+    # A retryable failure may legitimately return to the queue — that is the retry
+    # policy, not a duplicate risk, because nothing was confirmed uploaded.
+    assert can_transition(JobState.FAILED_RETRY, JobState.QUEUED)
+
+    # And the endpoint enforces it rather than trusting the table to be read correctly.
+    # Adopting resolves the uncertainty outright, so the general guard already refuses a
+    # second call — the specific requeue guard is what stands between an unresolved
+    # NEEDS_REVIEW job and a blind re-upload.
+    job_id = _ambiguous(ctx, session, new_job)
+    ctx.connector.state.recent_upload_ids = ["vid-mine"]
+    assert (
+        client.post(
+            f"/api/jobs/{job_id}/reconcile",
+            json={"video_id": "vid-mine", "resolution": "adopt"},
+            headers=auth,
+        ).status_code
+        == 200
+    )
+
+    response = client.post(
+        f"/api/jobs/{job_id}/reconcile", json={"resolution": "not_uploaded"}, headers=auth
+    )
+    assert response.status_code == 409
+    assert "no uncertain outcome" in response.json()["detail"]
 
 
 # ======================================================================#
@@ -615,3 +838,208 @@ def test_connections_are_listed_without_any_token(client, auth, connection) -> N
     assert ACCESS_SECRET not in text
     assert REFRESH_SECRET not in text
     assert body[0]["status"] == "active"
+
+
+# ======================================================================#
+# Regression: findings F-14, F-32, F-29, F-11, F-19
+# ======================================================================#
+
+
+@pytest.fixture
+def spa_client(ctx, tmp_path):
+    """A client over a real bundle, so the SPA fallback route is actually mounted."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>hexton</title>", encoding="utf-8")
+    app = create_app(ctx, frontend_dist=dist)
+    with TestClient(app, base_url=f"http://{ctx.settings.host}:{ctx.settings.port}") as c:
+        yield c
+
+
+def test_an_unknown_api_path_is_a_json_404_not_the_spa_shell(spa_client) -> None:
+    """F-14: the single-page fallback used to answer every ``GET /api/*`` with 200 HTML."""
+    session = spa_client.post("/api/session")
+    assert session.status_code == 200
+    headers = {CSRF_HEADER: session.json()["csrf_token"]}
+
+    response = spa_client.get("/api/definitely-not-a-route", headers=headers)
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["code"] == "not_found"
+
+    nested = spa_client.get("/api/jobs/999999/anything", headers=headers)
+    assert nested.status_code == 404
+    assert nested.headers["content-type"].startswith("application/json")
+
+
+def test_the_spa_fallback_still_serves_client_side_routes(spa_client) -> None:
+    for path in ("/", "/queue", "/reports"):
+        response = spa_client.get(path)
+        assert response.status_code == 200, path
+        assert response.headers["content-type"].startswith("text/html"), path
+
+
+def test_the_oauth_redirect_uri_reaches_the_callback_handler(ctx, app, client, auth) -> None:
+    """F-32: ``authorize`` advertised ``/oauth/callback`` while the route was registered
+    under ``/api/connections``, so the browser came back to the SPA, ``state`` was never
+    validated, and the route sat behind the session guard that ``SameSite=Strict`` makes
+    unreachable on a return from accounts.google.com.
+
+    The assertion is behavioural on purpose: the advertised URI is followed exactly as a
+    browser would follow it, and the only way to get 403 "unknown state" out of the
+    handler is for that handler to be the thing that answered.
+    """
+    from urllib.parse import urlparse
+
+    created = client.post(
+        "/api/connections", json={"provider": "youtube", "label": "Main"}, headers=auth
+    )
+    assert created.status_code == 201
+
+    advertised = client.post(
+        f"/api/connections/{created.json()['id']}/authorize", json={}, headers=auth
+    ).json()["redirect_uri"]
+    path = urlparse(advertised).path
+    assert path == "/oauth/callback"
+
+    with TestClient(app, base_url=f"http://{ctx.settings.host}:{ctx.settings.port}") as anon:
+        response = anon.get(f"{path}?code=x&state=unknown-state")
+    assert response.status_code == 403
+    assert response.headers["content-type"].startswith("application/json")
+    assert "state" in response.json()["detail"].lower()
+
+
+def test_the_oauth_callback_is_reachable_without_a_session(ctx, app) -> None:
+    """A browser arrives from accounts.google.com with no cookie (``SameSite=Strict``),
+    so the callback must be outside ``/api`` and must not be answered by the SPA."""
+    with TestClient(app, base_url=f"http://{ctx.settings.host}:{ctx.settings.port}") as anon:
+        response = anon.get("/oauth/callback?code=x&state=unknown-state")
+    # 403 from the handler itself: an unknown ``state`` is the CSRF condition it exists
+    # for. A 401 would mean the session guard swallowed it; text/html would mean the
+    # SPA did.
+    assert response.status_code == 403
+    assert response.headers["content-type"].startswith("application/json")
+    assert "state" in response.json()["detail"].lower()
+
+
+def test_every_loopback_spelling_is_accepted_as_a_host() -> None:
+    """F-29: configuring ``localhost`` left ``127.0.0.1`` off the allowlist, so opening
+    the other spelling answered 403 on every request."""
+    from hexton.api.security import allowed_hosts_for
+
+    for configured in ("127.0.0.1", "localhost", "::1"):
+        hosts = allowed_hosts_for(configured, 8787)
+        assert "127.0.0.1:8787" in hosts, configured
+        assert "localhost:8787" in hosts, configured
+        assert "[::1]:8787" in hosts, configured
+        # An unbracketed IPv6 Host header is not a valid Host value and must never be
+        # accepted just because it contains the configured text.
+        assert "::1:8787" not in hosts, configured
+
+
+def test_a_connection_referenced_by_a_job_keeps_its_credential_on_a_refused_delete(
+    ctx, client, auth, ids, connection
+) -> None:
+    """F-11: the credential used to be deleted *before* the reference check that raises
+    409, so a refused delete had already performed half of a revoke."""
+    created = client.post("/api/jobs", json=job_payload(ids), headers=auth)
+    assert created.status_code == 201
+
+    response = client.delete(f"/api/connections/{ids['connection_id']}", headers=auth)
+
+    assert response.status_code == 409
+    assert ctx.credentials.read(f"conn:{connection.public_id}:access") == ACCESS_SECRET
+    assert ctx.credentials.read(f"conn:{connection.public_id}:refresh") == REFRESH_SECRET
+    with ctx.sessions() as session:
+        from hexton.db.models import PlatformConnection
+
+        surviving = session.get(PlatformConnection, ids["connection_id"])
+        assert surviving is not None
+        assert surviving.status == "active"
+
+
+def test_media_check_does_not_fingerprint_a_file_that_is_not_a_clip(client, auth, tmp_path) -> None:
+    """F-19: ``POST /api/media/check`` takes any absolute path, so it must not hand back
+    the digest of a file it has already decided is not a video."""
+    secret = tmp_path / "session.key"
+    secret.write_bytes(b"0123456789abcdef" * 4)
+
+    body = client.post("/api/media/check", json={"path": str(secret)}, headers=auth).json()
+    assert body["exists"] is True, "existence is what this endpoint is for"
+    assert body["sha256"] is None
+    assert body["size_bytes"] == 0
+    assert any(issue["code"] == "bad_extension" for issue in body["issues"])
+
+
+def test_media_check_still_reports_a_real_clip_completely(client, auth, clip) -> None:
+    body = client.post("/api/media/check", json={"path": str(clip)}, headers=auth).json()
+    assert body["sha256"] and len(body["sha256"]) == 64
+    assert body["size_bytes"] > 0
+    assert body["container"] is not None
+
+
+def test_a_published_job_still_reads_after_its_observations_are_pruned(
+    ctx, client, auth, ids
+) -> None:
+    """F-02: ``_prune_evidence`` drops ``RemoteObservation`` rows after ``retention_days``
+    while the job row stays, and ``display_for`` then raised ``ValueError`` for a
+    PUBLISHED state with no surviving observation — taking ``GET /api/jobs`` down with
+    it. ``published_at_remote`` is written with the same transition and is not pruned.
+    """
+    from datetime import UTC, datetime
+
+    created = client.post("/api/jobs", json=job_payload(ids), headers=auth)
+    job_id = created.json()["id"]
+    with ctx.sessions() as session:
+        job = session.get(ScheduledJob, job_id)
+        job.state = "JOB-PUBLISHED"
+        job.video_id = "vid-pruned"
+        job.video_url = "https://www.youtube.com/watch?v=vid-pruned"
+        job.published_at_remote = datetime.now(UTC)
+        session.commit()
+        assert not job.observations, "the fixture never polled; evidence is the job's own"
+
+    listing = client.get("/api/jobs", headers=auth)
+    assert listing.status_code == 200
+    row = next(item for item in listing.json()["items"] if item["id"] == job_id)
+    assert row["display_label"] == "Published (verified)"
+    assert row["remote_state"] == "remote.public"
+
+    detail = client.get(f"/api/jobs/{job_id}", headers=auth)
+    assert detail.status_code == 200
+    assert detail.json()["job"]["display_label"] == "Published (verified)"
+
+
+def test_a_published_job_with_no_evidence_at_all_is_not_labelled_verified(
+    ctx, client, auth, ids
+) -> None:
+    """The read path must degrade, never 500 — and never claim verification it cannot
+    support. This state is unreachable through the state machine; it is the corrupt-row
+    case, and it is exactly the false publication claim the guard exists to prevent."""
+    created = client.post("/api/jobs", json=job_payload(ids), headers=auth)
+    job_id = created.json()["id"]
+    with ctx.sessions() as session:
+        job = session.get(ScheduledJob, job_id)
+        job.state = "JOB-PUBLISHED"
+        session.commit()
+
+    listing = client.get("/api/jobs", headers=auth)
+    assert listing.status_code == 200
+    row = next(item for item in listing.json()["items"] if item["id"] == job_id)
+    assert row["display_label"] != "Published (verified)"
+    assert row["remote_state"] != "remote.public"
+
+
+def test_the_settings_endpoint_says_whether_the_connector_can_reach_youtube(
+    ctx, client, auth
+) -> None:
+    """F-03: a UI cannot warn about a capability it is never told about.
+
+    ``connector_kind`` alone is not the signal — a build configured for ``youtube``
+    while the connector is still a stub would read as working. ``connector_ready`` is
+    derived from the connector itself.
+    """
+    body = client.get("/api/settings", headers=auth).json()
+    assert body["connector_kind"] == "fake"
+    assert body["connector_ready"] is False
+    assert body["build_profile"] == "development"

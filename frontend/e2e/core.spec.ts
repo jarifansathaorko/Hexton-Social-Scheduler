@@ -155,6 +155,9 @@ test.describe("upload queue", () => {
     await expect(retryRow).toContainText(/Schedule [A-Za-z0-9_-]+/);
     await expect(retryRow.getByText("Next retry")).toBeVisible();
     await expect(retryRow.getByText("quota_exhausted")).toBeVisible();
+    // The sentence a reschedule that YouTube refused now lands in (F-05) travels the
+    // same surface this row already renders, so it is pinned here.
+    await expect(retryRow.getByText("Daily quota exhausted; next attempt scheduled.")).toBeVisible();
     await expect(retryRow.getByText(/attempt 2\/3|\(2\/3\)/)).toBeVisible();
 
     const finished = page.locator("li.card", { hasText: "Bravo uploaded not verified" });
@@ -182,6 +185,47 @@ test.describe("upload queue", () => {
 
     await expect(page.getByRole("heading", { name: "Needs your decision" })).toBeVisible();
     await expect(page.getByText("Hexton will not retry them automatically")).toBeVisible();
+  });
+
+  test("the uncertain job's details offer every recovery the backend permits, and nothing else", async ({
+    page,
+  }) => {
+    // F-04: "This video is mine" was gated on a video ID already being stored — absent
+    // in exactly the ambiguous case that needs it — and rejecting cancelled the job
+    // outright, so a Short hit by one timeout had no exit at all.
+    await page.goto("/queue");
+    await page
+      .getByRole("button", { name: "Delta upload outcome uncertain" })
+      .click();
+
+    const panel = details(page);
+    await expect(panel).toContainText("Delta upload outcome uncertain");
+
+    // Both honest answers are offered: adopt something the ladder found, or say that
+    // nothing was uploaded and let the job run again.
+    await expect(
+      panel.getByRole("button", { name: "None of these are mine — run it again" }),
+    ).toBeVisible();
+    await expect(
+      panel.getByRole("button", { name: /None of these are mine — cancel/ }),
+    ).toBeVisible();
+
+    // The panel's own offer must never contradict the state machine: a blind retry of
+    // an ambiguous upload is how a duplicate Short gets published.
+    await expect(panel.getByRole("button", { name: "Retry" })).toHaveCount(0);
+    await expect(panel).toContainText("Hexton will not retry it");
+
+    // Re-queuing is a real state change the backend recorded, not a label the client
+    // painted over: the recovery offer disappears with the uncertainty itself, because
+    // there is no longer an outcome to reconcile.
+    await panel.getByRole("button", { name: "None of these are mine — run it again" }).click();
+    await expect(
+      panel.getByRole("button", { name: "None of these are mine — run it again" }),
+    ).toHaveCount(0);
+    await expect(panel.getByText("The outcome of the last upload could not be proven")).toHaveCount(
+      0,
+    );
+    await expect(panel).toContainText("Queued");
   });
 });
 

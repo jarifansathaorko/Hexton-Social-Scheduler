@@ -6,7 +6,20 @@ Design decisions, all of them consequences of the threat model rather than habit
 :mod:`hexton.config` refuses a non-loopback host at configuration time. This module
 adds the checks that binding alone does not provide: another process on the same
 machine — or another *user* account on the same machine — can reach ``127.0.0.1``, so
-the requests themselves still have to be authenticated and origin-checked.
+the requests themselves are origin- and host-checked rather than trusted because of
+where they came from.
+
+What that does and does not buy, stated precisely because the difference matters:
+the session defeats a *browser* attacker — a cross-origin page cannot read an
+HttpOnly ``SameSite=Strict`` cookie, cannot set the CSRF header, and cannot get a
+rebinding hostname past the Host allowlist. It does **not** authenticate an arbitrary
+local process. A process running as the same Windows user can read the per-user
+application-data directory directly, including ``session.key``, so it could mint a
+session without help from this module at all. The approved architecture
+(``02`` §9.2) deliberately keeps one local-auth mechanism rather than adding a second
+credential an operator would have to manage, which places same-user local processes
+*inside* the trust boundary. Other users on the machine are outside it, and the Host,
+Origin and CSRF checks are what keep them there.
 
 **One mechanism, not two.** There is no password prompt and no separate "local login".
 A single signed, HttpOnly, SameSite=Strict cookie is the whole design, minted by the
@@ -130,10 +143,6 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
         self.signer = signer
         self.allowed_hosts = allowed_hosts
         self.cookie_name = cookie_name
-        #: Nonces minted this process, so the API can confirm a CSRF token belongs to
-        #: the cookie that presented it. A pure HMAC comparison would accept a token
-        #: derived from a *different* valid session's nonce.
-        self._live: set[str] = set()
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         host = (request.headers.get("host") or "").lower()
@@ -147,8 +156,6 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
         identity = self.signer.verify(request.cookies.get(self.cookie_name))
-        if identity:
-            self._live.add(identity.nonce)
 
         if path.startswith("/api/"):
             # Origin is checked on *every* state-changing API request, including the
@@ -193,9 +200,6 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
     def _allowed_origins(self, host: str) -> frozenset[str]:
         return frozenset(f"http://{h}" for h in self.allowed_hosts if h == host or host == "")
 
-    def forget(self, nonce: str) -> None:
-        self._live.discard(nonce)
-
 
 def _deny(status: int, code: str, message: str) -> JSONResponse:
     # Denied responses get the same hardening headers as successful ones: a 401 or a
@@ -231,8 +235,17 @@ def allowed_hosts_for(host: str, port: int) -> frozenset[str]:
 
     Computed once at startup rather than matched loosely, because a wildcard host
     check is indistinguishable from no host check at all.
+
+    Every loopback spelling is always included, not just the configured one. They all
+    address this same process, and the browser an operator actually types into does not
+    necessarily agree with ``settings.host`` — configuring ``localhost`` while opening
+    ``http://127.0.0.1:8787`` used to answer 403 on every request, which reads as the
+    application being broken rather than as a host mismatch.
     """
-    return frozenset({f"{host}:{port}", f"localhost:{port}", f"[::1]:{port}"})
+    configured = host if host.startswith("[") else (f"[{host}]" if ":" in host else host)
+    return frozenset(
+        {f"{configured}:{port}", f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"}
+    )
 
 
 def read_headers(request: Request) -> Headers:

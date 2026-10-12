@@ -83,6 +83,11 @@ def load_or_create_session_key(path: Path) -> bytes:
     key = secrets.token_bytes(32)
     path.write_bytes(key.hex().encode("ascii"))
     try:
+        # On POSIX this yields a ``rw-------`` file. On Windows the C runtime maps
+        # only the read-only bit, so it is not a user-only ACL — the file's real
+        # protection is the DACL it inherited from ``%LOCALAPPDATA%``. Kept because it
+        # is correct where it can be correct, and spelled out because a comment
+        # claiming "user-only ACLs" here was not true on this platform (``F-25``).
         os.chmod(path, 0o600)
     except OSError:  # pragma: no cover - platform specific
         log.warning("Could not tighten permissions on %s", path)
