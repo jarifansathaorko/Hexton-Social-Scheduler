@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
-
 from hexton.db.types import UTCDateTime
 
 revision = "0002"

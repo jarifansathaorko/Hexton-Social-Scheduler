@@ -279,6 +279,7 @@ class JobRunner:
                 return job.state
 
             # --- 2. credential ------------------------------------------------
+            assert job.connection is not None
             try:
                 access = self._access_token(session, job.connection, now)
             except AuthorizationUnavailable as exc:
@@ -513,6 +514,7 @@ class JobRunner:
         now: datetime,
     ) -> ReconcileResult:
         """Settle an uncertain outcome before anything new is sent."""
+        assert job.connection is not None
         upload = _current_session(job)
         probe: ProbeResult | None = None
         probe_error: str | None = None
@@ -670,6 +672,7 @@ class JobRunner:
         access: str,
         now: datetime,
     ) -> str:
+        assert job.connection is not None
         upload = _current_session(job)
         total = job.media.size_bytes
         content_type = job.media.container or "video/mp4"

@@ -22,8 +22,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from hexton.api.deps import SessionDep
-from hexton.api.schemas_phase3 import MentionConfirmIn, MentionOut, MentionStateIn
+from hexton.api.schemas_phase3 import (
+    MentionConfirmIn,
+    MentionOut,
+    MentionStateIn,
+    MentionWorkflowStep,
+)
 from hexton.db.models import ScheduledJob
+from hexton.domain.jobstate import MentionState
+from hexton.domain.mention import mention_is_verified
 from hexton.services import mentions as mention_service
 
 router = APIRouter(prefix="/api/jobs", tags=["mentions"])
@@ -65,7 +72,7 @@ def _require_policy(session: Session) -> None:
         raise HTTPException(status_code=403, detail=result.reason)
 
 
-def _load(session, job_id: int) -> ScheduledJob:
+def _load(session: Session, job_id: int) -> ScheduledJob:
     job = session.get(ScheduledJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job {job_id} does not exist.")
@@ -84,7 +91,8 @@ def _out(view: mention_service.MentionView) -> MentionOut:
         confirmed_at=view.confirmed_at,
         reason=view.reason,
         steps=[
-            {"index": index, "instruction": step} for index, step in enumerate(view.steps, start=1)
+            MentionWorkflowStep(index=index, instruction=step)
+            for index, step in enumerate(view.steps, start=1)
         ],
         prohibitions=list(view.prohibitions),
         rewrite_warning=view.rewrite_warning,
@@ -166,8 +174,8 @@ def set_state(job_id: int, payload: MentionStateIn, session: Session = SessionDe
     content = job.content
     if content is None or not content.mention_requested:
         raise HTTPException(status_code=409, detail="This job does not request a mention.")
-    target = mention_service.MentionState(payload.state)
-    if mention_service.mention_is_verified(target):
+    target = MentionState(payload.state)
+    if mention_is_verified(target):
         raise HTTPException(  # pragma: no cover - the schema already refuses it
             status_code=409,
             detail="A mention can only become verified by an operator attestation.",
@@ -175,14 +183,14 @@ def set_state(job_id: int, payload: MentionStateIn, session: Session = SessionDe
     content.mention_state = target.value
     content.mention_confirmed_at = None
     content.mention_reason = {
-        mention_service.MentionState.MANUAL_REQUIRED: (
+        MentionState.MANUAL_REQUIRED: (
             "A mention is required and has not been confirmed in YouTube Studio."
         ),
-        mention_service.MentionState.PENDING_MANUAL: (
+        MentionState.PENDING_MANUAL: (
             "The operator has acknowledged the manual mention workflow and is completing "
             "it in YouTube Studio. Nothing has been verified."
         ),
-        mention_service.MentionState.FAILED: (
+        MentionState.FAILED: (
             "The operator reported that this mention was removed or did not take effect."
         ),
     }[target]

@@ -102,6 +102,7 @@ def build_context(
     sheets_state: SheetState | None = None,
     engine: Engine | None = None,
     credential_store: CredentialStore | None = None,
+    connector: PlatformConnector | None = None,
     log_to_stderr: bool = True,
 ) -> AppContext:
     """Assemble a process's dependencies. Call once, at startup."""
@@ -118,7 +119,7 @@ def build_context(
         allow_plaintext=settings.allow_plaintext_credentials,
     )
 
-    connector = select_connector(settings, profile=profile, fake_state=fake_state)
+    connector = connector or select_connector(settings, profile=profile, fake_state=fake_state)
     sheets_factory = select_sheets_connector_factory(
         settings, profile=profile, fake_state=sheets_state
     )

@@ -38,7 +38,7 @@ test("the queue indicator follows the worker's own heartbeat", async ({ page }) 
 
   // stdio is ignored on purpose: a pipe nobody drains fills up, and a worker blocked
   // on a full stdout buffer is a different bug than the one being tested here.
-  const worker = spawn(python, ["-m", "hexton", "worker"], {
+  const worker = spawn(python, ["-m", "hexton", "worker", "--test-mode"], {
     cwd: backend,
     env: process.env,
     stdio: "ignore",

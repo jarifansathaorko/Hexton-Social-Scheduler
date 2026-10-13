@@ -17,6 +17,7 @@ Data directory layout (all under one root so a backup is one folder copy):
 from __future__ import annotations
 
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -34,12 +35,21 @@ def default_data_dir() -> Path:
     return Path.home() / ".local" / "share" / "hexton"
 
 
+def _env_files() -> tuple[str, ...]:
+    files = [".env"]
+    if getattr(sys, "frozen", False):
+        exe_env = Path(sys.executable).parent / ".env"
+        if exe_env.is_file():
+            files.append(str(exe_env))
+    return tuple(files)
+
+
 class Settings(BaseSettings):
     """Runtime configuration. Environment variables override the defaults."""
 
     model_config = SettingsConfigDict(
         env_prefix="HEXTON_",
-        env_file=".env",
+        env_file=_env_files(),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -55,11 +65,17 @@ class Settings(BaseSettings):
     database_filename: str = "hexton.sqlite3"
 
     # --- composition -------------------------------------------------------
-    #: Selected once at process startup. "fake" (tests / first run) or "youtube".
-    connector_kind: str = "fake"
+    #: Selected once at process startup. "youtube" (production default) or "fake" (tests).
+    connector_kind: str = "youtube"
     #: Selected once at process startup. "windows_credential_manager" | "dpapi_file"
     #: | "plaintext" (refused unless HEXTON_ALLOW_PLAINTEXT=1).
     credential_store_kind: str = "auto"
+    #: Explicit test mode. Required to permit fake connectors in production startup.
+    test_mode: bool = False
+
+    # --- google oauth -------------------------------------------------------
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
 
     # --- session security --------------------------------------------------
     #: 32 bytes of entropy, hex. Generated and persisted on first run into

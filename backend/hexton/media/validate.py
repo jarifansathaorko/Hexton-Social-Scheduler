@@ -216,11 +216,12 @@ def verify_unchanged(path: str | Path, recorded_sha256: str) -> tuple[bool, Issu
 def format_bytes(n: int) -> str:
     if n < 1024:
         return f"{n} B"
+    size = float(n)
     for unit in ("KB", "MB", "GB", "TB"):
-        n /= 1024
-        if n < 1024:
-            return f"{n:.1f} {unit}"
-    return f"{n:.1f} PB"
+        size /= 1024
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+    return f"{size:.1f} PB"
 
 
 def is_allowed_path(path: str | Path) -> bool:

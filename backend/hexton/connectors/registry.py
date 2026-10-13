@@ -54,7 +54,10 @@ def select_connector(
         return FakeConnector(fake_state)
 
     if kind == "youtube":
-        return YouTubeConnector()
+        return YouTubeConnector(
+            client_id=settings.google_client_id,
+            client_secret=settings.google_client_secret,
+        )
 
     raise ConnectorSelectionError(f"Unknown connector kind: {kind!r}")
 

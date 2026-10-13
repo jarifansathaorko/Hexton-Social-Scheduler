@@ -41,6 +41,7 @@ process.env.HEXTON_E2E_PORT = PORT;
 process.env.HEXTON_E2E_DATA_DIR = DATA_DIR;
 process.env.HEXTON_DATA_DIR = DATA_DIR;
 process.env.HEXTON_CONNECTOR_KIND ||= "fake";
+process.env.HEXTON_TEST_MODE ||= "1";
 process.env.HEXTON_CREDENTIAL_STORE_KIND ||= "plaintext";
 process.env.HEXTON_ALLOW_PLAINTEXT_CREDENTIALS ||= "true";
 process.env.HEXTON_ALLOW_PLAINTEXT ||= "1";

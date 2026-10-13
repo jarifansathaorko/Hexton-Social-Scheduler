@@ -15,6 +15,7 @@ benefit the product can name.
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -49,6 +50,16 @@ log = logging.getLogger(__name__)
 #: ``backend/frontend/dist``, which does not exist, and the app would have served the
 #: 503 "not built yet" page forever even with a freshly built bundle.
 def _default_frontend_dist() -> Path:
+    # When packaged with PyInstaller, assets are unpacked into sys._MEIPASS or beside the exe
+    if getattr(sys, "frozen", False):
+        if hasattr(sys, "_MEIPASS"):
+            meipass_dist = Path(sys._MEIPASS) / "frontend" / "dist"
+            if meipass_dist.exists():
+                return meipass_dist
+        exe_dist = Path(sys.executable).parent / "frontend" / "dist"
+        if exe_dist.exists():
+            return exe_dist
+
     here = Path(__file__).resolve()
     repo_root = here.parents[3] / "frontend" / "dist"
     alongside_package = here.parents[2] / "frontend" / "dist"

@@ -50,6 +50,7 @@ from starlette.datastructures import Headers
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp
 
 #: Methods that change state and therefore require a CSRF token.
 UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
@@ -133,7 +134,7 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
 
     def __init__(
         self,
-        app: object,
+        app: ASGIApp,
         *,
         signer: SessionSigner,
         allowed_hosts: frozenset[str],

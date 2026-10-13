@@ -18,8 +18,8 @@ from sqlalchemy import engine_from_config, pool
 # Allow `alembic` to be run from the backend directory without installing first.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from hexton.config import get_settings  # noqa: E402
-from hexton.db.models import Base  # noqa: E402
+from hexton.config import get_settings
+from hexton.db.models import Base
 
 config = context.config
 if config.config_file_name is not None:

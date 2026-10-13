@@ -405,6 +405,19 @@ export function useConfirmChannel() {
   });
 }
 
+export function useUnconfirmChannel() {
+  const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
+  return useMutation({
+    mutationFn: (identityId: number) =>
+      api.post<never>(`/api/connections/channels/${identityId}/unconfirm`, {}),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Compliance (COMP-01..COMP-10)
 // ---------------------------------------------------------------------------

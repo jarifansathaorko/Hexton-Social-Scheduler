@@ -98,9 +98,12 @@ def list_jobs(
         .all()
     )
 
-    counts = dict(
-        session.execute(select(ScheduledJob.state, func.count()).group_by(ScheduledJob.state)).all()
-    )
+    counts: dict[str, int] = {
+        str(r[0]): int(r[1])
+        for r in session.execute(
+            select(ScheduledJob.state, func.count()).group_by(ScheduledJob.state)
+        ).all()
+    }
     response.headers["Cache-Control"] = "no-store"
     now = datetime.now(UTC)
     return JobListOut(

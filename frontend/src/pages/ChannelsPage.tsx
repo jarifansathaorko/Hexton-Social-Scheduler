@@ -4,12 +4,14 @@ import { ApiError } from "../api/client";
 import type { Connection, ConnectionAction } from "../api/types";
 import {
   useAuthorizeConnection,
+  useConfirmChannel,
   useConnections,
   useDiagnostic,
   useDisableConnection,
   useEnableConnection,
   useRefreshIdentities,
   useRevokeConnectionAction,
+  useUnconfirmChannel,
 } from "../hooks/api";
 import { formatWhen } from "../lib/state";
 
@@ -69,6 +71,8 @@ function ConnectionCard({ connection }: { connection: Connection }) {
   const disable = useDisableConnection();
   const enable = useEnableConnection();
   const revoke = useRevokeConnectionAction();
+  const confirmChannel = useConfirmChannel();
+  const unconfirmChannel = useUnconfirmChannel();
   const diagnostic = useDiagnostic(connection.id);
 
   const [result, setResult] = useState<ConnectionAction | null>(null);
@@ -124,9 +128,19 @@ function ConnectionCard({ connection }: { connection: Connection }) {
             className="btn"
             disabled={authorize.isPending || revoked}
             title={revoked ? "This connection was revoked. Create a new authorization instead." : undefined}
-            onClick={() => authorize.mutate(connection.id, { onSuccess: () => setError(null), onError: fail })}
+            onClick={() =>
+              authorize.mutate(connection.id, {
+                onSuccess: (data) => {
+                  if (data?.authorization_url) {
+                    window.location.href = data.authorization_url;
+                  }
+                  setError(null);
+                },
+                onError: fail,
+              })
+            }
           >
-            Reauthorize
+            {active ? "Reauthorize" : "Authorize with Google"}
           </button>
           <button
             className="btn"
@@ -215,9 +229,25 @@ function ConnectionCard({ connection }: { connection: Connection }) {
       {result && <ActionResult result={result} onDismiss={() => setResult(null)} />}
 
       <div className="mt-4 border-t border-edge pt-4">
-        <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">
-          Verified channel identities
-        </h3>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">
+            Verified channel identities
+          </h3>
+          {connection.channels.some((c) => !c.operator_confirmed_at) && (
+            <button
+              type="button"
+              className="btn btn-primary text-xs px-2.5 py-1"
+              disabled={confirmChannel.isPending}
+              onClick={() => {
+                connection.channels
+                  .filter((c) => !c.operator_confirmed_at)
+                  .forEach((c) => confirmChannel.mutate(c.id));
+              }}
+            >
+              {confirmChannel.isPending ? "Confirming…" : "Confirm all channels"}
+            </button>
+          )}
+        </div>
         {connection.channels.length === 0 ? (
           <p className="mt-2 text-sm text-ink-faint">
             No channel identity has been resolved from this authorization yet. Use
@@ -239,15 +269,36 @@ function ConnectionCard({ connection }: { connection: Connection }) {
                       {channel.verified_at && ` · resolved ${formatWhen(channel.verified_at)}`}
                     </div>
                   </div>
-                  <div className="text-right">
+                  <div className="flex flex-wrap items-center justify-end gap-2 text-right">
                     {channel.operator_confirmed_at ? (
-                      <span className="text-xs text-cue-success">
-                        Confirmed by you {formatWhen(channel.operator_confirmed_at)}
-                      </span>
+                      <>
+                        <span className="text-xs font-medium text-cue-success">
+                          ✓ Confirmed by you {formatWhen(channel.operator_confirmed_at)}
+                        </span>
+                        <button
+                          type="button"
+                          className="btn text-xs px-2 py-0.5 text-ink-muted"
+                          disabled={unconfirmChannel.isPending}
+                          onClick={() => unconfirmChannel.mutate(channel.id)}
+                          title="Revoke confirmation for publishing"
+                        >
+                          Unconfirm
+                        </button>
+                      </>
                     ) : (
-                      <span className="text-xs text-cue-attention">
-                        Not confirmed — never used for publishing
-                      </span>
+                      <>
+                        <span className="text-xs text-cue-attention">
+                          Not confirmed — never used for publishing
+                        </span>
+                        <button
+                          type="button"
+                          className="btn text-xs px-3 py-1 font-medium bg-cue-success/20 text-cue-success border-cue-success/40 hover:bg-cue-success/30"
+                          disabled={confirmChannel.isPending}
+                          onClick={() => confirmChannel.mutate(channel.id)}
+                        >
+                          {confirmChannel.isPending ? "Confirming…" : "Confirm channel"}
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>

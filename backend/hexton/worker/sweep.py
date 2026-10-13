@@ -176,6 +176,10 @@ class PublishConfirmationSweep:
             )
             return "pending"
 
+        if not job.video_id:
+            job.poll_result = PollResult.UNKNOWN.value
+            return "no_video_id"
+
         try:
             status = self.ctx.connector.get_video(access, job.video_id)
             quota_mod.add_units_on(session, provider, quota_mod.COST_READ, now)

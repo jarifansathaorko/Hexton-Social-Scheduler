@@ -16,10 +16,10 @@ project, a real consent screen, and a real spreadsheet exist. Nothing here runs 
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from .sheets import KEY_COLUMN, SheetDestination, SheetError, SheetWrite
+from .sheets import KEY_COLUMN, ErrorKind, SheetDestination, SheetError, SheetWrite
 
 
 def _as_google_credentials(value: Any) -> Any:
@@ -58,19 +58,8 @@ def _as_google_credentials(value: Any) -> Any:
     return value
 
 
-def _error_kind(exc: Exception) -> str:
-    """Map a Google ``HttpError`` onto this application's error vocabulary.
-
-    The status-code mapping is the only place a Google error is interpreted. ``403``
-    used to be split on response text — "has not granted" / "insufficient permission"
-    versus everything else — with a comment promising that "the operator-facing message
-    differs sharply between the two". Both arms returned ``"forbidden"``, and
-    :func:`hexton.services.sheets._explain_sheet_error` writes one sentence that already
-    covers both halves ("share the spreadsheet with that account, or connect an account
-    that owns it"). A branch that cannot change the outcome is not a distinction, and
-    the text match it rested on was never reliable anyway: Google does not promise that
-    wording.
-    """
+def _error_kind(exc: Exception) -> ErrorKind:
+    """Map a Google ``HttpError`` onto this application's error vocabulary."""
     status = getattr(exc, "status_code", None) or getattr(
         getattr(exc, "resp", None), "status", None
     )
@@ -98,7 +87,7 @@ class LiveSheetsConnector:
     def _build(self) -> Any:
         if self._service is None:
             try:
-                from googleapiclient.discovery import build
+                from googleapiclient.discovery import build  # type: ignore[import-untyped]
             except ImportError as exc:  # pragma: no cover - depends on the install
                 raise SheetError(
                     "network",
@@ -110,12 +99,12 @@ class LiveSheetsConnector:
             )
         return self._service
 
-    def _call(self, operation: str, **kwargs: Any) -> Any:
+    def _call(self, operation: Callable[[], Any], op_name: str = "operation", **kwargs: Any) -> Any:
         try:
             return operation().execute()
         except Exception as exc:
             kind = _error_kind(exc)
-            raise SheetError(kind, f"{operation.__name__} failed: {exc}") from exc
+            raise SheetError(kind, f"{op_name} failed: {exc}") from exc
 
     def verify(self, destination: SheetDestination) -> None:
         service = self._build()
@@ -124,6 +113,7 @@ class LiveSheetsConnector:
                 spreadsheetId=destination.spreadsheet_id,
                 fields="properties.title,sheets.properties.title",
             ),
+            op_name="verify",
         )
 
     def read_sync_keys(self, destination: SheetDestination) -> tuple[str, ...]:
@@ -137,6 +127,7 @@ class LiveSheetsConnector:
                     range=destination.key_range,
                 )
             ),
+            op_name="read_sync_keys",
         )
         values = (response or {}).get("values") or []
         return tuple(str(row[0]).strip() for row in values if row and str(row[0]).strip())
@@ -160,6 +151,7 @@ class LiveSheetsConnector:
                     includeValuesInResponse=False,
                 )
             ),
+            op_name="append_rows",
         )
         return SheetWrite(
             appended_keys=tuple(str(row.get(KEY_COLUMN, "")) for row in rows),

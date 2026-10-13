@@ -18,6 +18,7 @@ from hexton.domain.jobstate import (
     DISPLAY_MAP,
     TERMINAL_STATES,
     JobState,
+    MentionState,
     PollResult,
     RemoteState,
     can_retry,
@@ -90,7 +91,11 @@ def job_to_out(job: ScheduledJob, zone: ZoneInfo, *, now: datetime | None = None
         remote=RemoteState(remote_state),
         poll_result=poll,
         publish_at_passed=publish_passed,
-        mention=job.content.mention_state or "not_requested",
+        mention=(
+            MentionState(job.content.mention_state)
+            if job.content and job.content.mention_state
+            else MentionState.NOT_REQUESTED
+        ),
         progress_percent=job.progress_percent,
     )
 

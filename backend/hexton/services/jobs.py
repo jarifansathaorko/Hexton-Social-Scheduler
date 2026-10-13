@@ -903,6 +903,7 @@ def cancel_job(
             f"and could not be reached to change, so it must be checked by hand.",
         )
 
+    assert conn is not None
     try:
         if delete_remote:
             removed = ctx.connector.delete_video(token, job.video_id)

@@ -311,25 +311,25 @@ def outbox(status: str | None = None, session: Session = SessionDep) -> SheetsOu
                 payload=payload,
             )
         )
-    for record in session.scalars(summary_query).all():
-        payload = dict(record.payload or {})
+    for summary_rec in session.scalars(summary_query).all():
+        payload = dict(summary_rec.payload or {})
         try:
-            parsed_date = parse_summary_sync_key(record.sync_key)[0].isoformat()
+            parsed_date = parse_summary_sync_key(summary_rec.sync_key)[0].isoformat()
         except ValueError:  # pragma: no cover - keys are minted here
-            parsed_date = record.report_date
+            parsed_date = summary_rec.report_date
         rows.append(
             SheetsOutboxRowOut(
-                id=record.id,
+                id=summary_rec.id,
                 kind="daily_summary",
-                sync_key=record.sync_key,
-                status=record.status,
-                attempts=record.attempts,
+                sync_key=summary_rec.sync_key,
+                status=summary_rec.status,
+                attempts=summary_rec.attempts,
                 report_date=parsed_date,
                 schedule_id=None,
                 video_id=None,
                 upload_outcome=payload.get("Upload Outcome"),
-                last_synced_at=record.last_synced_at,
-                last_error=record.last_error,
+                last_synced_at=summary_rec.last_synced_at,
+                last_error=summary_rec.last_error,
                 payload=payload,
             )
         )

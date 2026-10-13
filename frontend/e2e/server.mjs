@@ -47,6 +47,7 @@ const env = {
   HEXTON_HOST: host,
   HEXTON_PORT: port,
   HEXTON_CONNECTOR_KIND: "fake",
+  HEXTON_TEST_MODE: "1",
   HEXTON_CREDENTIAL_STORE_KIND: "plaintext",
   HEXTON_ALLOW_PLAINTEXT_CREDENTIALS: "true",
   HEXTON_ALLOW_PLAINTEXT: "1",
@@ -65,7 +66,7 @@ function run(args, label) {
 
 await run([path.join(here, "seed.py"), dataDir], "seed");
 
-const server = spawn(python, ["-m", "hexton", "serve", "--no-start-worker"], {
+const server = spawn(python, ["-m", "hexton", "serve", "--no-start-worker", "--test-mode"], {
   cwd: backend,
   env,
   stdio: "inherit",

@@ -140,7 +140,7 @@ def dashboard(
             if r.state in (JobState.QUEUED.value, JobState.READY.value, JobState.SCHEDULED.value)
             and r.schedule.publish_at_utc is not None
         ),
-        key=lambda r: r.schedule.publish_at_utc,
+        key=lambda r: r.schedule.publish_at_utc or datetime.min.replace(tzinfo=UTC),
     )
     attention = [
         r
@@ -178,7 +178,7 @@ def counts(session: Session = SessionDep) -> dict[str, int]:
     rows = session.execute(
         select(ScheduledJob.state, func.count()).group_by(ScheduledJob.state)
     ).all()
-    return dict(rows)
+    return {str(r[0]): int(r[1]) for r in rows}
 
 
 __version__ = __version__

@@ -12,6 +12,7 @@ import {
   useTestWriteSheets,
   useVerifySheets,
   useRetryOutboxRecord,
+  useAuthorizeConnection,
 } from "../hooks/api";
 import { formatWhen } from "../lib/state";
 
@@ -80,7 +81,7 @@ export function SheetsPanel({ connections }: { connections: Connection[] }) {
       {health.data && <HealthPanel health={health.data} />}
 
       <div className="mt-5 border-t border-edge pt-4">
-        <SyncControls />
+        <SyncControls connectionId={config.data?.connection_id ?? 2} />
       </div>
 
       {outbox.data && outbox.data.rows.length > 0 && <Outbox rows={outbox.data.rows} />}
@@ -112,23 +113,43 @@ function ConfigForm({
   connections: Connection[];
 }) {
   const save = useSaveSheetsConfig();
+  const authorize = useAuthorizeConnection();
   const [draft, setDraft] = useState<SheetsConfig>(config);
-  const [reference, setReference] = useState("");
+  const [reference, setReference] = useState(config.spreadsheet_id ?? "");
 
-  // Adopt the server's copy whenever it changes underneath the draft. Without this the
-  // form would keep a stale draft after a save and quietly offer to "save" old values.
-  useEffect(() => setDraft(config), [config]);
+  // Adopt the server's copy whenever it changes underneath the draft.
+  useEffect(() => {
+    setDraft(config);
+    setReference(config.spreadsheet_id ?? "");
+  }, [config]);
 
   const optional = health?.optional_columns ?? [];
   const required = health?.required_columns ?? [];
-  const sheetsConnections = connections.filter((c) => c.provider === "sheets");
+  const sheetsConnections = connections.filter(
+    (c) => c.provider === "sheets" || c.provider === "youtube"
+  );
+
+  // If connection_id is not set, default to an available sheets or Google connection
+  useEffect(() => {
+    if (!draft.connection_id && sheetsConnections.length > 0) {
+      const preferred = sheetsConnections.find((c) => c.provider === "sheets") ?? sheetsConnections[0];
+      if (preferred) {
+        setDraft((prev) => ({ ...prev, connection_id: preferred.id }));
+      }
+    }
+  }, [sheetsConnections, draft.connection_id]);
+
+  const selectedConn = connections.find((c) => c.id === draft.connection_id);
 
   return (
     <form
       className="mt-4 flex flex-col gap-3 border-t border-edge pt-4"
       onSubmit={(event) => {
         event.preventDefault();
-        save.mutate(draft);
+        save.mutate({
+          ...draft,
+          spreadsheet_id: reference.trim() || null,
+        });
       }}
     >
       <div className="grid gap-3 sm:grid-cols-2">
@@ -138,7 +159,11 @@ function ConfigForm({
             className="input text-sm"
             value={reference}
             placeholder="https://docs.google.com/spreadsheets/d/… or the ID"
-            onChange={(event) => setReference(event.target.value)}
+            onChange={(event) => {
+              const val = event.target.value;
+              setReference(val);
+              setDraft((prev) => ({ ...prev, spreadsheet_id: val.trim() || null }));
+            }}
           />
           <span className="text-[11px] font-normal text-ink-faint">
             Pasted URLs are reduced to the spreadsheet ID before anything is stored.
@@ -176,34 +201,69 @@ function ConfigForm({
           </span>
         </label>
 
-        <label className="flex flex-col gap-1 text-xs font-medium text-ink">
-          Authorization
-          <select
-            className="input text-sm"
-            value={draft.connection_id ?? ""}
-            onChange={(event) =>
-              setDraft({ ...draft, connection_id: event.target.value ? Number(event.target.value) : null })
-            }
-          >
-            <option value="">Not selected</option>
-            {sheetsConnections.map((connection) => (
-              <option key={connection.id} value={connection.id}>
-                {connection.label} ({connection.status})
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="flex flex-col gap-1">
+          <label className="flex flex-col gap-1 text-xs font-medium text-ink">
+            Authorization
+            <select
+              className="input text-sm"
+              value={draft.connection_id ?? ""}
+              onChange={(event) =>
+                setDraft({ ...draft, connection_id: event.target.value ? Number(event.target.value) : null })
+              }
+            >
+              <option value="">Not selected</option>
+              {sheetsConnections.map((connection) => (
+                <option key={connection.id} value={connection.id}>
+                  {connection.label} ({connection.provider} · {connection.status})
+                </option>
+              ))}
+            </select>
+          </label>
+          {selectedConn && selectedConn.status !== "active" && (
+            <div className="mt-1 flex items-center gap-2">
+              <span className="text-xs text-cue-warning">Not authorized with Google yet.</span>
+              <button
+                type="button"
+                className="btn text-xs px-2.5 py-1"
+                disabled={authorize.isPending}
+                onClick={() =>
+                  authorize.mutate(selectedConn.id, {
+                    onSuccess: (data) => {
+                      if (data?.authorization_url) {
+                        window.location.href = data.authorization_url;
+                      }
+                    },
+                  })
+                }
+              >
+                {authorize.isPending ? "Connecting…" : "Authorize with Google"}
+              </button>
+            </div>
+          )}
+        </div>
 
-        <label className="flex items-center gap-2 self-end pb-2 text-xs font-medium text-ink">
-          <input
-            type="checkbox"
-            checked={draft.include_daily_summary}
-            onChange={(event) =>
-              setDraft({ ...draft, include_daily_summary: event.target.checked })
-            }
-          />
-          Write a daily completion summary
-        </label>
+        <div className="flex flex-col gap-2 self-end pb-2">
+          <label className="flex items-center gap-2 text-xs font-medium text-ink">
+            <input
+              type="checkbox"
+              checked={draft.enabled}
+              onChange={(event) =>
+                setDraft({ ...draft, enabled: event.target.checked })
+              }
+            />
+            Enable reporting
+          </label>
+          <label className="flex items-center gap-2 text-xs font-medium text-ink">
+            <input
+              type="checkbox"
+              checked={draft.include_daily_summary}
+              onChange={(event) =>
+                setDraft({ ...draft, include_daily_summary: event.target.checked })
+              }
+            />
+            Write a daily completion summary
+          </label>
+        </div>
       </div>
 
       {optional.length > 0 && (
@@ -257,10 +317,9 @@ function ConfigForm({
         </p>
       )}
       {save.data && <p className="text-xs text-ok">Saved.</p>}
-      {reference.trim() && (
-        <p className="text-[11px] text-ink-faint">
-          Enter the ID into the destination field, or clear this box — the reference is
-          not stored as typed.
+      {draft.spreadsheet_id && (
+        <p className="text-[11px] text-ink-muted">
+          Spreadsheet ID: <code className="font-mono text-ink">{draft.spreadsheet_id}</code>
         </p>
       )}
     </form>
@@ -320,11 +379,18 @@ function HealthPanel({ health }: { health: SheetsHealth }) {
   );
 }
 
-function SyncControls() {
+function SyncControls({ connectionId }: { connectionId: number | null }) {
   const verify = useVerifySheets();
   const testWrite = useTestWriteSheets();
   const sync = useSyncSheets();
+  const authorize = useAuthorizeConnection();
   const pending = verify.isPending || testWrite.isPending || sync.isPending;
+
+  const errorObj = verify.error ?? testWrite.error ?? sync.error;
+  const errorMessage = errorObj instanceof ApiError ? errorObj.message : errorObj ? "That did not go through." : null;
+  const isMissingCredential =
+    errorMessage !== null &&
+    (errorMessage.includes("No credential is stored") || errorMessage.includes("credential"));
 
   return (
     <>
@@ -340,12 +406,30 @@ function SyncControls() {
         </button>
       </div>
 
-      {(verify.error || testWrite.error || sync.error) && (
-        <p className="mt-2 text-xs text-cue-attention" role="alert">
-          {(verify.error ?? testWrite.error ?? sync.error) instanceof ApiError
-            ? ((verify.error ?? testWrite.error ?? sync.error) as ApiError).message
-            : "That did not go through."}
-        </p>
+      {errorMessage && (
+        <div className="mt-2 flex flex-col items-start gap-2">
+          <p className="text-xs text-cue-attention" role="alert">
+            {errorMessage}
+          </p>
+          {isMissingCredential && connectionId && (
+            <button
+              type="button"
+              className="btn btn-primary text-xs px-3 py-1.5 font-medium shadow-sm"
+              disabled={authorize.isPending}
+              onClick={() =>
+                authorize.mutate(connectionId, {
+                  onSuccess: (data) => {
+                    if (data?.authorization_url) {
+                      window.location.href = data.authorization_url;
+                    }
+                  },
+                })
+              }
+            >
+              {authorize.isPending ? "Connecting to Google…" : "👉 Click here to Authorize with Google"}
+            </button>
+          )}
+        </div>
       )}
 
       {verify.data && <OperationResult label="Verify access" result={verify.data} />}

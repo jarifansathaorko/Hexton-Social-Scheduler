@@ -24,11 +24,17 @@ from hexton.bootstrap import AppContext, build_context
 from hexton.config import Settings, get_settings
 from hexton.connectors.registry import BuildProfile
 
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
+BACKEND_ROOT = (
+    Path(sys._MEIPASS)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
+    else Path(__file__).resolve().parents[1]
+)
 
 
-def _context(*, packaged: bool | None = None) -> AppContext:
+def _context(*, packaged: bool | None = None, test_mode: bool = False) -> AppContext:
     settings = get_settings()
+    if test_mode and not settings.test_mode:
+        settings = settings.model_copy(update={"test_mode": True})
     profile = (
         _profile(settings)
         if packaged is None
@@ -49,6 +55,8 @@ def _in_source_checkout() -> bool:
     An editable install still counts as a checkout, and correctly so: the code being run
     is the developer's working tree.
     """
+    if getattr(sys, "frozen", False):
+        return False
     return (BACKEND_ROOT / "pyproject.toml").is_file()
 
 
@@ -85,14 +93,18 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
     settings = get_settings()
     settings.ensure_directories()
-    config = Config(str(BACKEND_ROOT / "alembic.ini"))
+    ini_path = BACKEND_ROOT / "alembic.ini"
+    migrations_dir = BACKEND_ROOT / "migrations"
+    config = Config(str(ini_path))
+    config.set_main_option("script_location", str(migrations_dir))
     config.set_main_option("sqlalchemy.url", f"sqlite+pysqlite:///{settings.database_path}")
     config.attributes["configure_logger"] = True
-    if args.revision == "base":
+    revision = getattr(args, "revision", "head")
+    if revision == "base":
         command.downgrade(config, "base")
     else:
-        command.upgrade(config, args.revision)
-    print(f"Database at {settings.database_path} is at revision {args.revision}.")
+        command.upgrade(config, revision)
+    print(f"Database at {settings.database_path} is at revision {revision}.")
     return 0
 
 
@@ -115,7 +127,19 @@ def cmd_revision(args: argparse.Namespace) -> int:
 def cmd_worker(args: argparse.Namespace) -> int:
     from hexton.worker.main import run_worker
 
-    ctx = _context()
+    is_test = getattr(args, "test_mode", False)
+    ctx = _context(test_mode=is_test)
+
+    # In production, fake connector is forbidden unless test mode is explicitly signaled
+    if ctx.connector.provider == "fake" and not ctx.settings.test_mode:
+        print(
+            "error: worker cannot bind to the fake connector in production. "
+            "Fake connectors are only permitted in test mode. "
+            "To run with fake connectors, pass --test-mode or set HEXTON_TEST_MODE=1.",
+            file=sys.stderr,
+        )
+        return 1
+
     return run_worker(ctx)
 
 
@@ -134,15 +158,26 @@ def _spawn_worker(ctx: AppContext) -> subprocess.Popen | None:
     env = dict(os.environ)
     env["HEXTON_DATA_DIR"] = str(ctx.settings.data_dir)
     env["HEXTON_CONNECTOR_KIND"] = ctx.settings.connector_kind
+    if ctx.settings.test_mode:
+        env["HEXTON_TEST_MODE"] = "1"
     creationflags = 0
     if os.name == "nt":  # pragma: no cover - Windows only
         creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
             subprocess, "CREATE_NO_WINDOW", 0
         )
     try:
+        if getattr(sys, "frozen", False):
+            cmd = [sys.executable, "worker"]
+        else:
+            cmd = [sys.executable, "-m", "hexton", "worker"]
+        if ctx.settings.test_mode:
+            cmd.append("--test-mode")
+        cwd = (
+            str(Path(sys.executable).parent) if getattr(sys, "frozen", False) else str(BACKEND_ROOT)
+        )
         return subprocess.Popen(
-            [sys.executable, "-m", "hexton", "worker"],
-            cwd=str(BACKEND_ROOT),
+            cmd,
+            cwd=cwd,
             env=env,
             creationflags=creationflags,
         )
@@ -156,7 +191,19 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     from hexton.api.app import create_app
 
-    ctx = _context()
+    is_test = getattr(args, "test_mode", False)
+    ctx = _context(test_mode=is_test)
+
+    # In production startup, binding to fake connectors is refused unless explicitly in test mode
+    if ctx.connector.provider == "fake" and not ctx.settings.test_mode:
+        print(
+            "error: 'serve' cannot bind to the fake connector in production. "
+            "Fake connectors are only permitted in test mode. "
+            "To run with fake connectors in tests, pass --test-mode or set HEXTON_TEST_MODE=1.",
+            file=sys.stderr,
+        )
+        return 1
+
     app = create_app(ctx)
 
     child: subprocess.Popen | None = None
@@ -181,6 +228,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
                 signal.signal(sig, lambda *_: shutdown())
         watcher = threading.Thread(target=lambda: child.wait(), daemon=True)
         watcher.start()
+
+    if getattr(args, "open_browser", False):
+        import time
+        import webbrowser
+
+        def _open() -> None:
+            time.sleep(1.0)
+            webbrowser.open(f"http://{ctx.settings.host}:{ctx.settings.port}")
+
+        threading.Thread(target=_open, daemon=True).start()
 
     try:
         uvicorn.run(
@@ -208,7 +265,8 @@ def cmd_dev(args: argparse.Namespace) -> int:
     from hexton.api.app import create_app
     from hexton.worker.main import Worker
 
-    ctx = _context()
+    is_test = getattr(args, "test_mode", False)
+    ctx = _context(test_mode=is_test)
     app = create_app(ctx)
     worker = Worker(ctx, owner="dev-worker")
     worker.install_signal_handlers()
@@ -243,6 +301,22 @@ def cmd_info(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # When launched with no arguments (e.g. double-clicking Hexton.exe), run migrations,
+    # start the server and worker, and automatically pop the web browser.
+    if not argv:
+        print(f"Hexton Scheduler v{__version__} starting...")
+        migrate_args = argparse.Namespace(revision="head")
+        cmd_migrate(migrate_args)
+        serve_args = argparse.Namespace(
+            no_start_worker=False,
+            test_mode=False,
+            open_browser=True,
+        )
+        return cmd_serve(serve_args)
+
     parser = argparse.ArgumentParser(prog="hexton", description="Hexton local scheduler")
     parser.add_argument("--version", action="version", version=f"hexton {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -257,13 +331,25 @@ def main(argv: list[str] | None = None) -> int:
     revision.set_defaults(func=cmd_revision)
 
     worker = sub.add_parser("worker", help="run the background worker")
+    worker.add_argument(
+        "--test-mode", action="store_true", help="enable test-mode execution with fake connectors"
+    )
     worker.set_defaults(func=cmd_worker)
 
     serve = sub.add_parser("serve", help="run the API and the worker")
     serve.add_argument("--no-start-worker", action="store_true")
+    serve.add_argument(
+        "--test-mode", action="store_true", help="enable test-mode execution with fake connectors"
+    )
+    serve.add_argument(
+        "--open-browser", action="store_true", help="open default browser to the web UI on launch"
+    )
     serve.set_defaults(func=cmd_serve)
 
     dev = sub.add_parser("dev", help="run the API and worker in one process")
+    dev.add_argument(
+        "--test-mode", action="store_true", help="enable test-mode execution with fake connectors"
+    )
     dev.set_defaults(func=cmd_dev)
 
     info = sub.add_parser("info", help="show the resolved configuration")

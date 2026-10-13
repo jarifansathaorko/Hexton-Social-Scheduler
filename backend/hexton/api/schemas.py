@@ -127,13 +127,13 @@ class ConnectionOut(BaseModel):
 
 
 class ConnectionCreateIn(BaseModel):
-    provider: Literal["youtube"] = "youtube"
+    provider: Literal["youtube", "sheets"] = "youtube"
     label: str = Field(min_length=1, max_length=128)
     scopes: list[str] = Field(default_factory=list)
 
 
 class ChannelConfirmIn(BaseModel):
-    channel_identity_id: int
+    channel_identity_id: int | None = None
 
 
 # ----------------------------------------------------------------------

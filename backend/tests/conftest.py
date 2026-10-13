@@ -83,6 +83,7 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         data_dir=tmp_path / "data",
         connector_kind="fake",
+        test_mode=True,
         credential_store_kind="in_memory",
         display_timezone="Asia/Dhaka",
         worker_poll_seconds=0.01,
@@ -162,7 +163,10 @@ def events_for(ctx: AppContext, job_id: int) -> list[tuple[str, str]]:
 #: reading the machine, so a slow run or a DST boundary cannot change the outcome —
 #: and so ``now`` is always a UTC instant rather than whatever zone the PC is set to.
 BASE = datetime(2026, 10, 11, 12, 0, 0, tzinfo=UTC)
-FUTURE = BASE + timedelta(days=2)
+# FUTURE is dynamic so tests comparing against real-world datetime.now(UTC)
+# (such as API validation) never fall inside the 30-min lead window or in the past.
+# Fixed at 12:00:00 UTC so timezone display tests (12:00Z == 18:00 Asia/Dhaka) remain stable.
+FUTURE = (datetime.now(UTC) + timedelta(days=7)).replace(hour=12, minute=0, second=0, microsecond=0)
 PAST = BASE - timedelta(hours=3)
 
 

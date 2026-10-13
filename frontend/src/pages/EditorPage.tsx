@@ -5,6 +5,7 @@ import type { JobInput, Media, ValidateResult } from "../api/types";
 import { MENTION_NAMES } from "../lib/state";
 import {
   useCheckMedia,
+  useConfirmChannel,
   useConnections,
   useCreateJob,
   useJob,
@@ -57,6 +58,7 @@ export function EditorPage() {
   const createJob = useCreateJob();
   const updateJob = useUpdateJob(jobId ?? 0);
   const validate = useValidateJob();
+  const confirmChannel = useConfirmChannel();
 
   useEffect(() => {
     if (form) return;
@@ -496,6 +498,25 @@ export function EditorPage() {
                     </optgroup>
                   )}
                 </select>
+                {channels.some((ch) => ch.operator_confirmed_at === null) && (
+                  <div className="mt-2.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-md border border-cue-attention/40 bg-cue-attention/10 p-2.5 text-xs">
+                    <span className="text-cue-attention font-medium">
+                      {channels.filter((ch) => ch.operator_confirmed_at === null).length} channel(s) need confirmation before publishing.
+                    </span>
+                    <button
+                      type="button"
+                      className="btn text-xs px-2.5 py-1 font-medium bg-cue-success/20 text-cue-success border-cue-success/40 hover:bg-cue-success/30 shrink-0"
+                      disabled={confirmChannel.isPending}
+                      onClick={() => {
+                        channels
+                          .filter((ch) => ch.operator_confirmed_at === null)
+                          .forEach((ch) => confirmChannel.mutate(ch.id));
+                      }}
+                    >
+                      {confirmChannel.isPending ? "Confirming…" : "Confirm all channels"}
+                    </button>
+                  </div>
+                )}
                 {channels.length === 0 && form.connection_id && (
                   <p className="mt-1 text-xs text-cue-attention">
                     No channel identity has been resolved on this connection yet. Open{" "}
@@ -507,9 +528,11 @@ export function EditorPage() {
                 )}
                 {channels.length > 0 && (
                   <p className="mt-1 text-xs text-ink-faint">
-                    Only identities you have confirmed are selectable. A label appearing in
-                    a list is not proof the connection can publish to it — confirm the
-                    identity first, and see the brand-account note on the Channels page.
+                    Only identities you have confirmed are selectable. You can confirm them here or review them in detail on the{" "}
+                    <a className="underline text-ink-muted hover:text-ink-strong" href="/channels">
+                      YouTube Channels
+                    </a>{" "}
+                    page.
                   </p>
                 )}
               </div>

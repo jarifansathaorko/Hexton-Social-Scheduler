@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import secrets
 import threading
 from contextlib import suppress
@@ -28,7 +29,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+import httpx
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
@@ -43,6 +46,8 @@ from hexton.bootstrap import AppContext
 from hexton.connectors.base import ChannelSummary, ConnectorError
 from hexton.db.models import ChannelIdentity, DataRetention, PlatformConnection, ScheduledJob
 from hexton.domain.jobstate import FailureKind
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/connections", tags=["connections"])
 
@@ -177,11 +182,15 @@ def list_connections(session: Session = SessionDep) -> list[ConnectionOut]:
 def create_connection(
     payload: ConnectionCreateIn, session: Session = SessionDep, ctx: AppContext = CtxDep
 ) -> ConnectionOut:
-    """Register a connection's *metadata*. No credential exists yet."""
+    default_scopes = (
+        ["https://www.googleapis.com/auth/spreadsheets"]
+        if payload.provider == "sheets"
+        else list(REQUESTED_SCOPES)
+    )
     conn = PlatformConnection(
         provider=payload.provider,
         label=payload.label,
-        scopes=list(payload.scopes or REQUESTED_SCOPES),
+        scopes=list(payload.scopes or default_scopes),
         status="disconnected",
     )
     session.add(conn)
@@ -207,10 +216,11 @@ def authorize(
         )
     )
 
+    client_id = ctx.settings.google_client_id or "local-hexton"
     redirect = f"http://{ctx.settings.host}:{ctx.settings.port}{_REDIRECT_PATH}"
     params = [
         "response_type=code",
-        "client_id=local-hexton",
+        f"client_id={client_id}",
         f"redirect_uri={redirect}",
         f"scope={' '.join(conn.scopes or REQUESTED_SCOPES)}",
         f"state={state}",
@@ -219,6 +229,16 @@ def authorize(
         "access_type=offline",
         "prompt=consent",
     ]
+    is_live = ctx.connector.provider == "youtube"
+    has_client_id = bool(ctx.settings.google_client_id)
+    enabled = not is_live or has_client_id
+    blocked_reason = None
+    if is_live and not has_client_id:
+        blocked_reason = (
+            "Google Client ID is not configured. Add HEXTON_GOOGLE_CLIENT_ID to .env "
+            "or your environment to enable live authorization."
+        )
+
     return {
         "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?" + "&".join(params),
         "state": state,
@@ -226,25 +246,20 @@ def authorize(
         "scopes": list(conn.scopes or REQUESTED_SCOPES),
         "note": "Opening this URL is a manual, operator-driven step. Hexton never "
         "navigates a browser or reads a cookie on the operator's behalf.",
-        "enabled": ctx.connector.provider != "youtube",
-        "blocked_reason": (
-            None
-            if ctx.connector.provider != "youtube"
-            else "The live YouTube connector is not enabled in this build. Phase 0 "
-            "recorded FEAS-01/FEAS-02 as blocked pending a Google Cloud project and a "
-            "consent configuration; see 08-phase0-feasibility-report.md §9."
-        ),
+        "enabled": enabled,
+        "blocked_reason": blocked_reason,
     }
 
 
 @callback_router.get(_REDIRECT_PATH)
 def oauth_callback(
+    request: Request,
     code: str | None = None,
     state: str | None = None,
     error: str | None = None,
     session: Session = SessionDep,
     ctx: AppContext = CtxDep,
-) -> dict[str, Any]:
+) -> Any:
     """The loopback redirect target. Validates ``state`` before doing anything."""
     if error:
         raise HTTPException(status_code=400, detail=f"Authorization was refused: {error}")
@@ -259,11 +274,145 @@ def oauth_callback(
             "was not accepted; start again from Settings.",
         )
     if ctx.connector.provider == "youtube":
-        raise HTTPException(
-            status_code=501,
-            detail="State was validated, but exchanging the code requires the live "
-            "connector, which is blocked on FEAS-01/FEAS-02.",
+        client_id = ctx.settings.google_client_id
+        client_secret = ctx.settings.google_client_secret
+        if not client_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Google Client ID is not configured on this server.",
+            )
+        redirect = f"http://{ctx.settings.host}:{ctx.settings.port}{_REDIRECT_PATH}"
+        token_data: dict[str, str] = {
+            "client_id": client_id,
+            "code": code,
+            "code_verifier": flow.verifier,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect,
+        }
+        if client_secret:
+            token_data["client_secret"] = client_secret
+
+        token_url = (
+            f"{getattr(ctx.connector, 'oauth_base_url', 'https://oauth2.googleapis.com')}/token"
         )
+        try:
+            with httpx.Client(timeout=30.0) as http_client:
+                token_resp = http_client.post(token_url, data=token_data)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Network error contacting Google OAuth token endpoint: {exc}",
+            ) from exc
+
+        if token_resp.status_code != 200:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Google token exchange failed (HTTP {token_resp.status_code}): {token_resp.text[:300]}",
+            )
+
+        resp_payload = token_resp.json() or {}
+        access_token = resp_payload.get("access_token")
+        refresh_token = resp_payload.get("refresh_token")
+        expires_in = resp_payload.get("expires_in", 3600)
+
+        if not access_token:
+            raise HTTPException(
+                status_code=400, detail="Token response did not contain an access_token."
+            )
+
+        conn = _load(session, flow.connection_id)
+        key = f"conn:{conn.public_id}"
+        ctx.credentials.write(f"{key}:access", access_token)
+        if refresh_token:
+            ctx.credentials.write(f"{key}:refresh", refresh_token)
+
+        now = datetime.now(UTC)
+        conn.status = "active"
+        conn.granted_at = now
+        conn.token_expires_at = now + timedelta(seconds=expires_in)
+        conn.last_token_check_at = now
+        conn.last_token_check_ok = True
+
+        # Discover channels for this credential
+        try:
+            channels = ctx.connector.list_owned_channels(access_token)
+            for ch in channels:
+                _upsert_identity(session, conn, ch, now)
+        except Exception as exc:
+            log.warning("Channel identity discovery failed during OAuth callback: %s", exc)
+
+        session.commit()
+        if request and "text/html" in request.headers.get("accept", ""):
+            target_path = "/reports" if conn.provider == "sheets" else "/channels"
+            html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="2;url={target_path}?authorized=true">
+  <title>Hexton - Authorization Successful</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }}
+    .card {{
+      background: #1e293b;
+      padding: 2.5rem;
+      border-radius: 12px;
+      border: 1px solid #334155;
+      max-width: 440px;
+      text-align: center;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+    }}
+    .badge {{
+      display: inline-block;
+      background: #10b981;
+      color: white;
+      width: 48px;
+      height: 48px;
+      line-height: 48px;
+      border-radius: 50%;
+      font-size: 24px;
+      margin-bottom: 1rem;
+    }}
+    h1 {{ font-size: 1.25rem; margin: 0 0 0.5rem; }}
+    p {{ font-size: 0.875rem; color: #94a3b8; margin: 0 0 1.5rem; line-height: 1.5; }}
+    a {{
+      display: inline-block;
+      background: #3b82f6;
+      color: white;
+      padding: 0.6rem 1.2rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }}
+    a:hover {{ background: #2563eb; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">&#10003;</div>
+    <h1>Authorization Successful</h1>
+    <p>Google has authorized <strong>{conn.label}</strong>. Returning to Hexton in 2 seconds...</p>
+    <a href="{target_path}">Return to Hexton</a>
+  </div>
+</body>
+</html>"""
+            return HTMLResponse(content=html, status_code=200)
+
+        return {
+            "status": "authorized",
+            "connection_id": flow.connection_id,
+            "message": "Authorization successful. Return to Channels to confirm your channel.",
+        }
+
     return {"status": "validated", "connection_id": flow.connection_id}
 
 
@@ -359,7 +508,7 @@ def refresh_identities(
 
 @router.post("/channels/{identity_id}/confirm", response_model=ChannelOut)
 def confirm_channel(
-    identity_id: int, payload: ChannelConfirmIn, session: Session = SessionDep
+    identity_id: int, payload: ChannelConfirmIn | None = None, session: Session = SessionDep
 ) -> ChannelOut:
     """Record the operator's explicit confirmation that this is the target channel."""
     record = session.get(ChannelIdentity, identity_id)
@@ -368,6 +517,19 @@ def confirm_channel(
             status_code=404, detail=f"Channel identity {identity_id} does not exist."
         )
     record.operator_confirmed_at = datetime.now(UTC)
+    session.commit()
+    return ChannelOut.model_validate(record)
+
+
+@router.post("/channels/{identity_id}/unconfirm", response_model=ChannelOut)
+def unconfirm_channel(identity_id: int, session: Session = SessionDep) -> ChannelOut:
+    """Revoke operator confirmation for this channel."""
+    record = session.get(ChannelIdentity, identity_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404, detail=f"Channel identity {identity_id} does not exist."
+        )
+    record.operator_confirmed_at = None
     session.commit()
     return ChannelOut.model_validate(record)
 
