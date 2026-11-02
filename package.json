@@ -1,0 +1,68 @@
+{
+  "name": "hexton-scheduler",
+  "productName": "Hexton Scheduler",
+  "version": "1.0.0",
+  "description": "Professional YouTube Shorts Multi-Channel Scheduler & Analytics Hub",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "electron:dev": "electron .",
+    "postinstall": "node electron/scripts/optimize_portable_nsis.js",
+    "pack": "electron-builder --dir",
+    "dist:portable": "node electron/scripts/optimize_portable_nsis.js && electron-builder --win portable"
+  },
+  "keywords": [
+    "youtube",
+    "scheduler",
+    "shorts",
+    "multi-channel",
+    "analytics"
+  ],
+  "author": "Hexton Systems",
+  "license": "Proprietary",
+  "devDependencies": {
+    "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "electron-updater": "^6.8.11"
+  },
+  "build": {
+    "appId": "com.hextonsystems.hextonscheduler",
+    "copyright": "Copyright © 2026 Hexton Systems. All rights reserved.",
+    "productName": "Hexton Scheduler",
+    "directories": {
+      "output": "dist/portable"
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "jarifansathaorko",
+        "repo": "Hexton-Social-Scheduler"
+      }
+    ],
+    "files": [
+      "electron/**/*",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "dist/Hexton.exe",
+        "to": "hexton_server.exe"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "frontend/public/favicon.ico"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-Portable.${ext}",
+      "splashImage": null
+    }
+  }
+}

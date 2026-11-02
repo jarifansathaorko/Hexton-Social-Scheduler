@@ -104,3 +104,34 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:hexton.*"]
+
+[tool.basedpyright]
+include = ["hexton"]
+extraPaths = ["tests"]
+typeCheckingMode = "standard"
+reportMissingParameterType = false
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportUnknownArgumentType = false
+reportMissingTypeArgument = false
+reportAny = false
+reportImplicitRelativeImport = false
+reportUnusedCallResult = false
+reportUnknownMemberType = false
+reportMissingTypeStubs = false
+
+[tool.pyrefly]
+python-version = "3.12"
+search-path = [".", "tests"]
+search_path = [".", "tests"]
+project-includes = ["hexton/**"]
+project-excludes = ["tests/**", "**/tests/**", ".venv/**"]
+
+[tool.pyrefly.errors]
+implicit-any-parameter = false
+unannotated-parameter = false
+implicit-any-return = false
+unannotated-return = false
+missing-type-argument = false
+missing-import = false
+

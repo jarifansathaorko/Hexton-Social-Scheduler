@@ -24,7 +24,7 @@ reads use the default deferred transaction.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -66,7 +66,7 @@ def build_engine(
     def _configure(dbapi_conn: object, _record: object) -> None:  # pragma: no cover - driver
         cursor = dbapi_conn.cursor()  # type: ignore[attr-defined]
         cursor.execute("PRAGMA journal_mode=WAL")
-        cursor.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+        cursor.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.close()
@@ -79,7 +79,7 @@ def make_session_factory(engine: Engine) -> sessionmaker[Session]:
 
 
 @contextmanager
-def immediate_transaction(engine: Engine) -> Iterator[Connection]:
+def immediate_transaction(engine: Engine) -> Generator[Connection, None, None]:
     """A ``BEGIN IMMEDIATE`` transaction on a dedicated connection.
 
     Used by the job-claim path. Under a deferred transaction two workers can both
@@ -113,7 +113,7 @@ def immediate_transaction(engine: Engine) -> Iterator[Connection]:
 
 
 @contextmanager
-def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
+def session_scope(factory: sessionmaker[Session]) -> Generator[Session, None, None]:
     """Transactional scope. Commits on success, rolls back on any exception."""
     session = factory()
     try:
@@ -129,4 +129,4 @@ def session_scope(factory: sessionmaker[Session]) -> Iterator[Session]:
 def is_writable(engine: Engine) -> bool:
     """Cheap liveness check used by the health endpoint."""
     with engine.connect() as conn:
-        return conn.execute(text("SELECT 1")).scalar_one() == 1
+        return bool(conn.execute(text("SELECT 1")).scalar_one() == 1)

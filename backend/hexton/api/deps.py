@@ -9,7 +9,7 @@ the process was configured for.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from zoneinfo import ZoneInfo
 
 from fastapi import Depends, Request
@@ -24,11 +24,11 @@ if TYPE_CHECKING:  # pragma: no cover
 
 
 def get_ctx(request: Request) -> AppContext:
-    return request.app.state.ctx
+    return cast(AppContext, request.app.state.ctx)
 
 
 def get_signer(request: Request) -> SessionSigner:
-    return request.app.state.signer
+    return cast(SessionSigner, request.app.state.signer)
 
 
 def get_zone(ctx: AppContext = Depends(get_ctx)) -> ZoneInfo:

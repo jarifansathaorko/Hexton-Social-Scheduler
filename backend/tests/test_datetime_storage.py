@@ -206,9 +206,9 @@ def test_the_same_instant_renders_differently_in_each_zone(ctx, new_job) -> None
 
     dhaka_text = to_display(instant, resolve_zone("Asia/Dhaka"))
     berlin_text = to_display(instant, resolve_zone("Europe/Berlin"))
-
+    expected_berlin = instant.astimezone(BERLIN).strftime("%H:%M")
     assert "18:00" in dhaka_text  # 12:00Z is 18:00 in Dhaka
-    assert "14:00" in berlin_text  # and 14:00 CEST in Berlin
+    assert expected_berlin in berlin_text  # Berlin in CET/CEST
     assert dhaka_text != berlin_text
 
 

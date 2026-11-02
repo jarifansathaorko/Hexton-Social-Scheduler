@@ -51,12 +51,22 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/connections", tags=["connections"])
 
-#: The narrowest set that supports this product. ``01`` §C-15 forbids drive-by scopes;
-#: anything not on this list is not requested.
-REQUESTED_SCOPES = (
+#: The complete scope set required to upload, manage, publish, and delete YouTube videos
+#: and track multi-channel analytics for client proof-of-work.
+#: NOTE: Never mix Google Sheets / Drive scopes into YouTube connections, as Google Brand Accounts
+#: (common when linking multiple channels on one Gmail) do not support Drive/Sheets and will fail with
+#: "Service unavailable / servicerestricted".
+YOUTUBE_SCOPES = (
+    "https://www.googleapis.com/auth/youtube.force-ssl",
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
 )
+
+SHEETS_SCOPES = (
+    "https://www.googleapis.com/auth/spreadsheets",
+)
+
+REQUESTED_SCOPES = YOUTUBE_SCOPES
 
 #: COMP-04: delete Authorized Data within this long of a revocation (``DF-20``/``DF-21``).
 RETENTION_DAYS_CLIENT = 7
@@ -75,6 +85,69 @@ _REDIRECT_PATH = "/oauth/callback"
 #: * ``SameSite=Strict`` means the session cookie is *not* sent on the cross-site
 #:   top-level navigation back from accounts.google.com, so a route under ``/api``
 #:   would be answered with 401 before it could validate ``state``.
+def _oauth_error_html(title: str, message: str, redirect_url: str) -> str:
+    return f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="refresh" content="5;url={redirect_url}">
+  <title>Hexton - {title}</title>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f172a;
+      color: #f8fafc;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+    }}
+    .card {{
+      background: #1e293b;
+      padding: 2.5rem;
+      border-radius: 12px;
+      border: 1px solid #ef4444;
+      max-width: 460px;
+      text-align: center;
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+    }}
+    .badge {{
+      display: inline-block;
+      background: #ef4444;
+      color: white;
+      width: 48px;
+      height: 48px;
+      line-height: 48px;
+      border-radius: 50%;
+      font-size: 24px;
+      margin-bottom: 1rem;
+    }}
+    h1 {{ font-size: 1.25rem; margin: 0 0 0.5rem; }}
+    p {{ font-size: 0.875rem; color: #94a3b8; margin: 0 0 1.5rem; line-height: 1.5; }}
+    a {{
+      display: inline-block;
+      background: #3b82f6;
+      color: white;
+      padding: 0.6rem 1.2rem;
+      border-radius: 6px;
+      text-decoration: none;
+      font-size: 0.875rem;
+      font-weight: 500;
+    }}
+    a:hover {{ background: #2563eb; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="badge">&#10007;</div>
+    <h1>{title}</h1>
+    <p>{message}</p>
+    <a href="{redirect_url}">Return to Channels</a>
+  </div>
+</body>
+</html>"""
+
 callback_router = APIRouter(tags=["connections"])
 
 
@@ -167,15 +240,26 @@ def _load(session: Session, connection_id: int) -> PlatformConnection:
 
 
 @router.get("", response_model=list[ConnectionOut])
-def list_connections(session: Session = SessionDep) -> list[ConnectionOut]:
-    rows = (
+def list_connections(
+    include_pending: bool = False,
+    session: Session = SessionDep,
+) -> list[ConnectionOut]:
+    rows = list(
         session.execute(
             select(PlatformConnection).options(selectinload(PlatformConnection.identities))
         )
         .scalars()
         .all()
     )
-    return [_out(c) for c in rows]
+    if include_pending:
+        return [_out(c) for c in rows]
+    # Prune any empty ghost connections that have 0 identities and no granted tokens
+    valid_rows = [
+        c
+        for c in rows
+        if len(c.identities) > 0 or c.granted_at is not None or c.status == "revoked"
+    ]
+    return [_out(c) for c in valid_rows]
 
 
 @router.post("", response_model=ConnectionOut, status_code=201)
@@ -183,10 +267,43 @@ def create_connection(
     payload: ConnectionCreateIn, session: Session = SessionDep, ctx: AppContext = CtxDep
 ) -> ConnectionOut:
     default_scopes = (
-        ["https://www.googleapis.com/auth/spreadsheets"]
+        list(SHEETS_SCOPES)
         if payload.provider == "sheets"
-        else list(REQUESTED_SCOPES)
+        else list(YOUTUBE_SCOPES)
     )
+    # Check if there is an existing empty connection with no identities to reuse or clean up
+    empty_conns = list(
+        session.execute(
+            select(PlatformConnection)
+            .where(
+                PlatformConnection.provider == payload.provider,
+            )
+            .options(selectinload(PlatformConnection.identities))
+        )
+        .scalars()
+        .all()
+    )
+    reusable: PlatformConnection | None = None
+    for candidate in empty_conns:
+        if len(candidate.identities) == 0:
+            if reusable is None:
+                reusable = candidate
+            else:
+                # Delete duplicate empty connection so they never pile up
+                key = f"conn:{candidate.public_id}"
+                ctx.credentials.delete(f"{key}:access")
+                ctx.credentials.delete(f"{key}:refresh")
+                session.delete(candidate)
+
+    if reusable is not None:
+        reusable.label = payload.label
+        reusable.status = "disconnected"
+        reusable.granted_at = None
+        reusable.token_expires_at = None
+        reusable.scopes = list(payload.scopes or default_scopes)
+        session.commit()
+        return _out(_load(session, reusable.id))
+
     conn = PlatformConnection(
         provider=payload.provider,
         label=payload.label,
@@ -206,13 +323,21 @@ def authorize(
     conn = _load(session, connection_id)
     state = secrets.token_urlsafe(24)
     verifier = secrets.token_urlsafe(48)
+    scopes = (
+        list(SHEETS_SCOPES)
+        if conn.provider == "sheets"
+        else list(YOUTUBE_SCOPES)
+    )
+    conn.scopes = scopes
+    session.flush()
+
     _put_flow(
         PendingFlow(
             state=state,
             verifier=verifier,
             connection_id=conn.id,
             created_at=datetime.now(UTC),
-            scopes=tuple(conn.scopes or REQUESTED_SCOPES),
+            scopes=tuple(scopes),
         )
     )
 
@@ -222,12 +347,12 @@ def authorize(
         "response_type=code",
         f"client_id={client_id}",
         f"redirect_uri={redirect}",
-        f"scope={' '.join(conn.scopes or REQUESTED_SCOPES)}",
+        f"scope={' '.join(scopes)}",
         f"state={state}",
         f"code_challenge={PendingFlow(state, verifier, conn.id, datetime.now(UTC)).challenge()}",
         "code_challenge_method=S256",
         "access_type=offline",
-        "prompt=consent",
+        "prompt=consent select_account",
     ]
     is_live = ctx.connector.provider == "youtube"
     has_client_id = bool(ctx.settings.google_client_id)
@@ -243,7 +368,7 @@ def authorize(
         "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth?" + "&".join(params),
         "state": state,
         "redirect_uri": redirect,
-        "scopes": list(conn.scopes or REQUESTED_SCOPES),
+        "scopes": scopes,
         "note": "Opening this URL is a manual, operator-driven step. Hexton never "
         "navigates a browser or reads a cookie on the operator's behalf.",
         "enabled": enabled,
@@ -262,7 +387,23 @@ def oauth_callback(
 ) -> Any:
     """The loopback redirect target. Validates ``state`` before doing anything."""
     if error:
+        flow = _take_flow(state) if state else None
+        if flow:
+            conn = session.get(PlatformConnection, flow.connection_id)
+            if conn and len(conn.identities) == 0:
+                session.delete(conn)
+                session.commit()
+        if request and "text/html" in request.headers.get("accept", ""):
+            return HTMLResponse(
+                content=_oauth_error_html(
+                    "Authorization Cancelled",
+                    f"Google authorization was cancelled or refused ({error}). No channel was connected.",
+                    "/channels?error=cancelled",
+                ),
+                status_code=200,
+            )
         raise HTTPException(status_code=400, detail=f"Authorization was refused: {error}")
+
     if not code or not state:
         raise HTTPException(status_code=400, detail="Missing code or state.")
     flow = _take_flow(state)
@@ -299,12 +440,38 @@ def oauth_callback(
             with httpx.Client(timeout=30.0) as http_client:
                 token_resp = http_client.post(token_url, data=token_data)
         except Exception as exc:
+            conn = session.get(PlatformConnection, flow.connection_id)
+            if conn and len(conn.identities) == 0:
+                session.delete(conn)
+                session.commit()
+            if request and "text/html" in request.headers.get("accept", ""):
+                return HTMLResponse(
+                    content=_oauth_error_html(
+                        "Connection Failed",
+                        f"Network error contacting Google OAuth token endpoint: {exc}",
+                        "/channels?error=network_error",
+                    ),
+                    status_code=200,
+                )
             raise HTTPException(
                 status_code=502,
                 detail=f"Network error contacting Google OAuth token endpoint: {exc}",
             ) from exc
 
         if token_resp.status_code != 200:
+            conn = session.get(PlatformConnection, flow.connection_id)
+            if conn and len(conn.identities) == 0:
+                session.delete(conn)
+                session.commit()
+            if request and "text/html" in request.headers.get("accept", ""):
+                return HTMLResponse(
+                    content=_oauth_error_html(
+                        "Token Exchange Failed",
+                        f"Google token exchange failed (HTTP {token_resp.status_code}). Please try again.",
+                        "/channels?error=token_failed",
+                    ),
+                    status_code=200,
+                )
             raise HTTPException(
                 status_code=400,
                 detail=f"Google token exchange failed (HTTP {token_resp.status_code}): {token_resp.text[:300]}",
@@ -334,12 +501,47 @@ def oauth_callback(
         conn.last_token_check_ok = True
 
         # Discover channels for this credential
+        channels: list[ChannelSummary] = []
         try:
             channels = ctx.connector.list_owned_channels(access_token)
-            for ch in channels:
-                _upsert_identity(session, conn, ch, now)
         except Exception as exc:
             log.warning("Channel identity discovery failed during OAuth callback: %s", exc)
+
+        if conn.provider == "youtube" and not channels:
+            # The chosen Google account has no YouTube channel!
+            # Revoke credential and delete the empty connection so no ghost account remains.
+            key = f"conn:{conn.public_id}"
+            for name in ("access", "refresh"):
+                token = ctx.credentials.read(f"{key}:{name}")
+                if token and name == "refresh":
+                    with suppress(Exception):
+                        ctx.connector.revoke(token)
+                ctx.credentials.delete(f"{key}:{name}")
+            session.delete(conn)
+            session.commit()
+
+            if request and "text/html" in request.headers.get("accept", ""):
+                return HTMLResponse(
+                    content=_oauth_error_html(
+                        "No YouTube Channel Found",
+                        "The selected Google account has no YouTube channel associated with it. Please ensure the Google account has a YouTube channel created or choose another account.",
+                        "/channels?error=no_channel",
+                    ),
+                    status_code=200,
+                )
+            raise HTTPException(
+                status_code=400,
+                detail="No YouTube channel was found for this Google account.",
+            )
+
+        owned_ids = {ch.channel_id for ch in channels}
+        if channels and conn.provider == "youtube":
+            conn.label = f"YouTube · {channels[0].title}"
+        for ch in channels:
+            _upsert_identity(session, conn, ch, now)
+        for ident in conn.identities:
+            if ident.channel_id not in owned_ids:
+                ident.operator_confirmed_at = None
 
         session.commit()
         if request and "text/html" in request.headers.get("accept", ""):
@@ -498,10 +700,16 @@ def refresh_identities(
         raise HTTPException(status_code=409, detail=f"Could not read identities: {exc}") from exc
 
     now = datetime.now(UTC)
+    owned_ids = {ch.channel_id for ch in channels}
+    if channels and conn.provider == "youtube":
+        conn.label = f"YouTube · {channels[0].title}"
     seen = set()
     for summary in channels:
         record = _upsert_identity(session, conn, summary, now)
         seen.add(record.id)
+    for ident in conn.identities:
+        if ident.channel_id not in owned_ids:
+            ident.operator_confirmed_at = None
     session.commit()
     return _out(_load(session, connection_id))
 
@@ -645,28 +853,33 @@ def mark_data_deleted(connection_id: int, session: Session = SessionDep) -> Conn
 
 @router.delete("/{connection_id}", status_code=204)
 def delete_connection(
-    connection_id: int, session: Session = SessionDep, ctx: AppContext = CtxDep
+    connection_id: int,
+    force: bool = False,
+    session: Session = SessionDep,
+    ctx: AppContext = CtxDep,
 ) -> None:
-    """Remove a connection that nothing references.
-
-    The reference check happens **before** anything is destroyed. The order used to be
-    the other way round: the credential was deleted first and the ``409`` raised second,
-    so a connection with jobs answered "this connection is referenced by at least one
-    job" while its refresh token had already gone — a refusal that had nonetheless
-    performed half of a revoke, with no way to undo it.
-    """
+    """Remove a connection that nothing references (or force unlink)."""
     conn = _load(session, connection_id)
     jobs = session.execute(
-        select(ScheduledJob.id).where(ScheduledJob.connection_id == conn.id).limit(1)
-    ).first()
-    if jobs is not None:
-        raise HTTPException(
-            status_code=409,
-            detail="This connection is referenced by at least one job. Cancel or "
-            "reassign those jobs first.",
-        )
+        select(ScheduledJob).where(ScheduledJob.connection_id == conn.id)
+    ).scalars().all()
+    if jobs:
+        if not force:
+            raise HTTPException(
+                status_code=409,
+                detail="This connection is referenced by at least one job. Cancel or "
+                "reassign those jobs first.",
+            )
+        for job in jobs:
+            job.connection_id = None
+            job.channel_identity_id = None
+
     key = f"conn:{conn.public_id}"
     for name in ("access", "refresh"):
+        token = ctx.credentials.read(f"{key}:{name}")
+        if token and name == "refresh":
+            with suppress(Exception):
+                ctx.connector.revoke(token)
         ctx.credentials.delete(f"{key}:{name}")
     session.delete(conn)
     session.commit()

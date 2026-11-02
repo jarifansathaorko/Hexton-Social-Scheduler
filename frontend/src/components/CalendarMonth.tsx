@@ -1,17 +1,22 @@
 import { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import type { Job } from "../api/types";
 import { cueClass, cueFromBackend, formatWhen } from "../lib/state";
+import {
+  IconChevronLeft,
+  IconChevronRight,
+  IconPlus,
+} from "./Icons";
 
-const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /**
- * Month-view calendar.
- *
- * A calendar rather than a list, because "is anything going out on the 14th?" is a
- * shape question and a list answers it badly. Jobs are placed by their **intended**
- * publication time in the operator's own zone, and a job with no time is parked in a
- * separate "unscheduled" rail rather than being given an arbitrary date — assigning
- * one would look like a plan the operator never made.
+ * Month-view Calendar matching Panel 2 of the HexScheduler design reference:
+ * - View mode toggles: Month, Week, List, Today
+ * - Month navigation header with previous/next controls
+ * - Status Legend pills with canonical colors (Scheduled, In Progress, Needs Attention, Failed, Completed)
+ * - Fine dark grid with day numbers, violet highlight for today, and styled job chips
+ * - Direct click to select job into URL query param
  */
 export function CalendarMonth({
   jobs,
@@ -22,6 +27,7 @@ export function CalendarMonth({
   onSelect: (id: number) => void;
   selectedId: number | null;
 }) {
+  const [viewMode, setViewMode] = useState<"Month" | "Week" | "List">("Month");
   const [cursor, setCursor] = useState(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
@@ -31,7 +37,7 @@ export function CalendarMonth({
     const year = cursor.getFullYear();
     const month = cursor.getMonth();
     const first = new Date(year, month, 1);
-    const startOffset = (first.getDay() + 6) % 7; // Monday-first
+    const startOffset = first.getDay(); // Sunday-first matching reference collage
     const daysInMonth = new Date(year, month + 1, 0).getDate();
 
     const cells: (Date | null)[] = Array.from({ length: startOffset }, () => null);
@@ -63,76 +69,153 @@ export function CalendarMonth({
     return `${now.getFullYear()}-${now.getMonth()}-${now.getDate()}`;
   })();
 
+  const monthTitle = cursor.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+  const goToday = () => {
+    const now = new Date();
+    setCursor(new Date(now.getFullYear(), now.getMonth(), 1));
+  };
+
   return (
     <div className="flex flex-col gap-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">
-          {cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })}
-        </h2>
-        <div className="flex gap-2">
-          <button
-            className="btn"
-            onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}
-          >
-            Previous
-          </button>
-          <button
-            className="btn"
-            onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}
-          >
-            Next
-          </button>
+      {/* Calendar Top Controls Bar */}
+      <div className="flex flex-wrap items-center justify-between gap-4 hs-card p-4">
+        {/* Month Title & Prev/Next */}
+        <div className="flex items-center gap-3">
+          <h2 className="text-lg font-bold text-white tracking-tight">{monthTitle}</h2>
+          <div className="flex items-center gap-1">
+            <button
+              className="btn p-1.5 rounded-lg text-[var(--hs-text-muted)] hover:text-white"
+              onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() - 1, 1))}
+              aria-label="Previous month"
+            >
+              <IconChevronLeft size={16} />
+            </button>
+            <button
+              className="btn p-1.5 rounded-lg text-[var(--hs-text-muted)] hover:text-white"
+              onClick={() => setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1))}
+              aria-label="Next month"
+            >
+              <IconChevronRight size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* View Mode Segmented Control + Add Schedule CTA */}
+        <div className="flex items-center gap-3">
+          <div className="flex items-center rounded-lg border border-[var(--hs-border)] bg-[var(--hs-surface-raised)] p-0.5">
+            {(["Month", "Week", "List"] as const).map((mode) => (
+              <button
+                key={mode}
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-all ${
+                  viewMode === mode
+                    ? "bg-[var(--hs-violet-soft)] text-[var(--hs-violet-bright)] border border-[var(--hs-border-strong)] shadow-sm"
+                    : "text-[var(--hs-text-secondary)] hover:text-white"
+                }`}
+                onClick={() => setViewMode(mode)}
+              >
+                {mode}
+              </button>
+            ))}
+            <button
+              className="px-3 py-1 text-xs font-medium rounded-md text-[var(--hs-text-secondary)] hover:text-white border-l border-[var(--hs-border)] ml-1"
+              onClick={goToday}
+            >
+              Today
+            </button>
+          </div>
+
+          <Link to="/new" className="btn btn-primary py-1.5 px-3 rounded-lg text-xs font-semibold">
+            <IconPlus size={14} />
+            Add Schedule
+          </Link>
         </div>
       </div>
 
-      <CueLegend />
+      {/* Status Legend Pills */}
+      <StatusLegendBar />
 
-      <div className="card overflow-hidden">
-        <div className="grid grid-cols-7 border-b border-edge bg-surface-raised">
+      {/* Calendar Surface */}
+      <div className="hs-card overflow-hidden">
+        {/* Weekday Columns */}
+        <div className="grid grid-cols-7 border-b border-[var(--hs-border)] bg-[var(--hs-surface-raised)]">
           {WEEKDAYS.map((day) => (
-            <div key={day} className="px-2 py-2 text-center text-xs uppercase tracking-wide text-ink-faint">
+            <div key={day} className="px-3 py-2.5 text-center text-xs font-semibold uppercase tracking-wider text-[var(--hs-text-muted)]">
               {day}
             </div>
           ))}
         </div>
-        <div className="grid grid-cols-7">
+
+        {/* Date Matrix Grid */}
+        <div className="grid grid-cols-7 divide-x divide-y divide-[var(--hs-border)]/50 bg-[var(--hs-surface)]">
           {weeks.flat().map((date, index) => {
             const key = date ? `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}` : `gap-${index}`;
             const dayJobs = date ? (byDay.get(key) ?? []) : [];
+            const isToday = date && key === todayKey;
+
             return (
               <div
                 key={key}
-                className={`min-h-[110px] border-b border-r border-edge/50 p-1.5 ${
-                  date && key === todayKey ? "bg-accent/[0.07]" : ""
+                className={`min-h-[120px] p-2 flex flex-col justify-between transition-colors ${
+                  !date ? "bg-[var(--hs-canvas)]/40" : isToday ? "bg-[var(--hs-violet-soft)]/20" : "hover:bg-[var(--hs-surface-raised)]/40"
                 }`}
               >
                 {date && (
                   <>
-                    <div
-                      className={`mb-1 text-xs ${
-                        key === todayKey ? "font-semibold text-accent" : "text-ink-faint"
-                      }`}
-                    >
-                      {date.getDate()}
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span
+                        className={`text-xs font-mono font-semibold ${
+                          isToday
+                            ? "grid h-6 w-6 place-items-center rounded-full bg-[var(--hs-violet)] text-white shadow-sm"
+                            : "text-[var(--hs-text-muted)]"
+                        }`}
+                      >
+                        {date.getDate()}
+                      </span>
+                      {dayJobs.length > 2 && (
+                        <span className="text-[10px] font-semibold text-[var(--hs-violet-bright)] bg-[var(--hs-violet-soft)] border border-[var(--hs-border-strong)] px-1.5 rounded-full">
+                          +{dayJobs.length - 2}
+                        </span>
+                      )}
                     </div>
-                    <ul className="flex flex-col gap-1">
-                      {dayJobs.map((job) => (
-                        <li key={job.id}>
-                          <button
-                            onClick={() => onSelect(job.id)}
-                            title={`${job.title} — ${formatWhen(job.publish_at_utc)}`}
-                            aria-label={`${job.title || "(untitled)"}, ${job.display_label}, publishes ${formatWhen(job.publish_at_utc)}`}
-                            aria-pressed={job.id === selectedId}
-                            className={`w-full truncate rounded border px-1.5 py-1 text-left text-[11px] ${
-                              job.id === selectedId
-                                ? "border-accent bg-accent/10 text-ink"
-                                : `${cueClass(cueFromBackend(job.display_cue))} bg-canvas`
-                            }`}
-                          >
-                            {job.title || "(untitled)"}
-                          </button>
-                        </li>
-                      ))}
+
+                    {/* Job Event Chips */}
+                    <ul className="flex flex-col gap-1.5 overflow-hidden">
+                      {dayJobs.slice(0, 3).map((job) => {
+                        const isSelected = job.id === selectedId;
+                        const cue = cueFromBackend(job.display_cue);
+                        const chipClass =
+                          cue === "warning"
+                            ? "bg-[var(--hs-danger)]/15 border-[var(--hs-danger)]/40 text-[var(--hs-danger)]"
+                            : cue === "attention"
+                              ? "bg-[var(--hs-warning)]/15 border-[var(--hs-warning)]/40 text-[var(--hs-warning)]"
+                              : cue === "success"
+                                ? "bg-[var(--hs-success)]/15 border-[var(--hs-success)]/40 text-[var(--hs-success)]"
+                                : cue === "progress"
+                                  ? "bg-[var(--hs-info)]/15 border-[var(--hs-info)]/40 text-[var(--hs-info)]"
+                                  : "bg-[var(--hs-violet-soft)] border-[var(--hs-border-strong)] text-[var(--hs-violet-bright)]";
+
+                        return (
+                          <li key={job.id}>
+                            <button
+                              onClick={() => onSelect(job.id)}
+                              title={`${job.title} — ${formatWhen(job.publish_at_utc)}`}
+                              aria-label={`${job.title || "(untitled)"}, ${job.display_label}, publishes ${formatWhen(job.publish_at_utc)}`}
+                              aria-pressed={isSelected}
+                              className={`w-full truncate rounded-md border p-1.5 text-left text-[11px] font-medium transition-all ${
+                                isSelected
+                                  ? "border-[var(--hs-violet)] bg-[var(--hs-violet)] text-white shadow-md shadow-violet-950/50"
+                                  : chipClass
+                              }`}
+                            >
+                              <div className="flex items-center gap-1 truncate">
+                                <span className="h-1.5 w-1.5 rounded-full bg-current shrink-0" />
+                                <span className="truncate">{job.title || "(untitled)"}</span>
+                              </div>
+                            </button>
+                          </li>
+                        );
+                      })}
                     </ul>
                   </>
                 )}
@@ -142,20 +225,20 @@ export function CalendarMonth({
         </div>
       </div>
 
+      {/* Unscheduled Content Rail */}
       {unscheduled.length > 0 && (
-        <section className="card p-4">
-          <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">
-            No publication time yet
+        <section className="hs-card p-4">
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-[var(--hs-text-muted)]">
+            No publication time yet ({unscheduled.length})
           </h3>
-          <p className="mt-1 text-xs text-ink-faint">
-            These jobs have no schedule, so they are not placed on the calendar. A job
-            with no time will not publish — Hexton never invents one.
+          <p className="mt-1 text-xs text-[var(--hs-text-secondary)]">
+            These jobs have no scheduled publication date. A job with no time will not publish until you schedule it.
           </p>
           <ul className="mt-3 flex flex-wrap gap-2">
             {unscheduled.map((job) => (
               <li key={job.id}>
                 <button
-                  className={`btn px-2.5 py-1 text-xs ${cueClass(cueFromBackend(job.display_cue))}`}
+                  className={`btn px-3 py-1.5 text-xs font-medium rounded-lg ${cueClass(cueFromBackend(job.display_cue))}`}
                   onClick={() => onSelect(job.id)}
                 >
                   {job.title || "(untitled)"}
@@ -170,30 +253,28 @@ export function CalendarMonth({
 }
 
 /**
- * What the five colours mean.
- *
- * Colour is never the only carrier: the chip beside each entry already spells out the
- * state in words, and this legend names the cue itself. The wording is the PRD's own —
- * "grey outline, blue progress, amber attention, red warning, green filled" — so the
- * legend describes the *cue* without inventing a second mapping from colour to job
- * meaning, which is exactly the duplication the canonical state map exists to prevent.
+ * Status legend pills row matching Panel 2 of the reference design.
  */
-function CueLegend() {
-  const cues: [string, string][] = [
-    ["border-cue-neutral/50", "Grey outline — neutral"],
-    ["border-cue-progress/60 bg-cue-progress/10", "Blue — in progress"],
-    ["border-cue-attention/60 bg-cue-attention/10", "Amber — needs attention"],
-    ["border-cue-warning/60 bg-cue-warning/10", "Red — warning"],
-    ["border-cue-success/60 bg-cue-success/10", "Green — done"],
+function StatusLegendBar() {
+  const legendItems = [
+    { label: "Scheduled", color: "bg-[var(--hs-violet)]", border: "border-[var(--hs-violet)]/40" },
+    { label: "In Progress", color: "bg-[var(--hs-info)]", border: "border-[var(--hs-info)]/40" },
+    { label: "Needs Attention", color: "bg-[var(--hs-warning)]", border: "border-[var(--hs-warning)]/40" },
+    { label: "Warning / Failed", color: "bg-[var(--hs-danger)]", border: "border-[var(--hs-danger)]/40" },
+    { label: "Completed / Verified", color: "bg-[var(--hs-success)]", border: "border-[var(--hs-success)]/40" },
   ];
+
   return (
-    <ul className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-ink-muted">
-      {cues.map(([classes, label]) => (
-        <li key={label} className="flex items-center gap-1.5">
-          <span className={`h-2.5 w-2.5 rounded-full border-2 ${classes}`} aria-hidden />
-          {label}
-        </li>
+    <div className="flex flex-wrap items-center gap-3 px-1">
+      {legendItems.map((item) => (
+        <div
+          key={item.label}
+          className="flex items-center gap-2 rounded-full border border-[var(--hs-border)] bg-[var(--hs-surface-raised)] px-3 py-1 text-xs font-medium text-[var(--hs-text-secondary)]"
+        >
+          <span className={`h-2 w-2 rounded-full ${item.color}`} aria-hidden />
+          <span>{item.label}</span>
+        </div>
       ))}
-    </ul>
+    </div>
   );
 }

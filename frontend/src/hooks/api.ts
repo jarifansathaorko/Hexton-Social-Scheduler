@@ -16,8 +16,12 @@ import {
 } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type {
+  AnalyticsOverview,
+  AnalyticsRefreshResult,
+  AnalyticsVideoList,
   AuthorizeResult,
   CancelResult,
+  ChannelSearchResult,
   Connection,
   ConnectionAction,
   Dashboard,
@@ -28,6 +32,7 @@ import type {
   JobList,
   Media,
   MediaCheck,
+  MediaPickResult,
   Mention,
   OutboxRow,
   PolicyDetail,
@@ -216,10 +221,26 @@ export function useCheckMedia() {
   });
 }
 
+export function usePickMedia() {
+  return useMutation({
+    mutationFn: (initialDir?: string) =>
+      api.post<MediaPickResult>("/api/media/pick", { initial_dir: initialDir }),
+  });
+}
+
 export function useAddMedia() {
   const invalidate = useInvalidateJobs();
   return useMutation({
     mutationFn: (path: string) => api.post<Media>("/api/media", { path }),
+    onSuccess: () => void invalidate(),
+  });
+}
+
+export function useUploadMedia() {
+  const invalidate = useInvalidateJobs();
+  return useMutation({
+    mutationFn: ({ file }: { file: File }) =>
+      api.upload<Media>(`/api/media/upload?filename=${encodeURIComponent(file.name)}`, file),
     onSuccess: () => void invalidate(),
   });
 }
@@ -341,8 +362,26 @@ export function useReconcileJob() {
 export function useDeleteJob() {
   const invalidate = useInvalidateJobs();
   return useMutation({
-    mutationFn: (id: number) => api.del<void>(`/api/jobs/${id}`),
+    mutationFn: (arg: number | { id: number; deleteRemote?: boolean; force?: boolean }) => {
+      const id = typeof arg === "number" ? arg : arg.id;
+      const deleteRemote = typeof arg === "number" ? true : (arg.deleteRemote ?? true);
+      const force = typeof arg === "number" ? false : (arg.force ?? false);
+      const params = new URLSearchParams();
+      if (!deleteRemote) params.set("delete_remote", "false");
+      if (force) params.set("force", "true");
+      const query = params.toString() ? `?${params.toString()}` : "";
+      return api.del<void>(`/api/jobs/${id}${query}`);
+    },
     onSuccess: () => void invalidate(),
+  });
+}
+
+export function useCreateConnection() {
+  const refresh = useInvalidateConnections();
+  return useMutation({
+    mutationFn: (payload: { provider: string; label: string; scopes?: string[] }) =>
+      api.post<Connection>("/api/connections", payload),
+    onSuccess: () => refresh(),
   });
 }
 
@@ -515,6 +554,19 @@ export function useRevokeConnectionAction() {
   });
 }
 
+export function useDeleteConnection() {
+  const invalidate = useInvalidateJobs();
+  const refresh = useInvalidateConnections();
+  return useMutation({
+    mutationFn: ({ id, force = true }: { id: number; force?: boolean }) =>
+      api.del<void>(`/api/connections/${id}${force ? "?force=true" : ""}`),
+    onSuccess: () => {
+      void invalidate();
+      refresh();
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Sheets reporting (FEAT-010, AC-MVP-008)
 // ---------------------------------------------------------------------------
@@ -655,3 +707,119 @@ export function useEnqueueReports() {
     onSuccess: refresh,
   });
 }
+
+// ----------------------------------------------------------------------
+// Multi-Channel Analytics & 1K+ View Deliverables (Phase 1 & 2)
+// ----------------------------------------------------------------------
+
+export const analyticsKeys = {
+  overview: (channelId?: string) => ["analytics", "overview", channelId ?? "all"] as const,
+  videos: (filters: {
+    channel_id?: string;
+    qualified_only?: boolean;
+    search?: string;
+    sort_by?: string;
+    limit?: number;
+    offset?: number;
+  }) => ["analytics", "videos", filters] as const,
+};
+
+export function useAnalyticsOverview(channelId?: string) {
+  const query = channelId ? `?channel_id=${encodeURIComponent(channelId)}` : "";
+  return useQuery({
+    queryKey: analyticsKeys.overview(channelId),
+    queryFn: () => api.get<AnalyticsOverview>(`/api/analytics/overview${query}`),
+    staleTime: 10_000,
+  });
+}
+
+export function useAnalyticsVideos(filters: {
+  channel_id?: string;
+  start_date?: string;
+  end_date?: string;
+  qualified_only?: boolean;
+  search?: string;
+  sort_by?: string;
+  limit?: number;
+  offset?: number;
+}) {
+  const params = new URLSearchParams();
+  if (filters.channel_id) params.set("channel_id", filters.channel_id);
+  if (filters.start_date) params.set("start_date", filters.start_date);
+  if (filters.end_date) params.set("end_date", filters.end_date);
+  if (filters.qualified_only) params.set("qualified_only", "true");
+  if (filters.search) params.set("search", filters.search);
+  if (filters.sort_by) params.set("sort_by", filters.sort_by);
+  if (filters.limit) params.set("limit", String(filters.limit));
+  if (filters.offset) params.set("offset", String(filters.offset));
+  const query = params.toString() ? `?${params.toString()}` : "";
+
+  return useQuery({
+    queryKey: analyticsKeys.videos(filters),
+    queryFn: () => api.get<AnalyticsVideoList>(`/api/analytics/videos${query}`),
+    staleTime: 5_000,
+  });
+}
+
+export function useRefreshAnalytics() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (channelId?: string) => {
+      const query = channelId ? `?channel_id=${encodeURIComponent(channelId)}` : "";
+      return api.post<AnalyticsRefreshResult>(`/api/analytics/refresh${query}`);
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["analytics"] });
+      void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      void queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+    },
+  });
+}
+
+export function useChannelSearch(query: string, enabled = true) {
+  const clean = query.trim().replace(/^@/, "");
+  return useQuery({
+    queryKey: ["channels", "search", clean],
+    queryFn: () =>
+      api.get<ChannelSearchResult[]>(`/api/channels/search?q=${encodeURIComponent(clean)}`),
+    enabled: enabled && clean.length > 0,
+    staleTime: 60_000,
+  });
+}
+
+export function useUpdateVideoApproval() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ jobId, approval }: { jobId: number; approval: "approved" | "rejected" | null }) =>
+      api.post<{ ok: boolean; job_id: number; creator_approval: string | null }>(
+        `/api/analytics/videos/${jobId}/approval`,
+        { approval }
+      ),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["analytics", "videos"] });
+    },
+  });
+}
+
+export interface SmartSlotItem {
+  publish_at_utc: string;
+  display_local: string;
+  score: number;
+  label: string;
+  clearance_hours: number;
+  peak_weight: number;
+}
+
+export function useSmartSlots(channelId?: string | null) {
+  return useQuery({
+    queryKey: ["smart-slots", channelId],
+    queryFn: () => {
+      const q = channelId ? `?channel_id=${encodeURIComponent(channelId)}` : "";
+      return api.get<SmartSlotItem[]>(`/api/jobs/smart-slots${q}`);
+    },
+    staleTime: 30_000,
+  });
+}
+
+
+

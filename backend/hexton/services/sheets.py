@@ -62,6 +62,7 @@ from hexton.domain.report_schema import (
 from hexton.domain.sync_key import (
     make_summary_sync_key,
     make_sync_key,
+    parse_sync_key,
 )
 from sqlalchemy.orm import Session
 
@@ -133,11 +134,15 @@ def _parse_cutoff(text: str) -> time:
         ) from None
 
 
-def destination(config: SheetsConfig | None) -> SheetDestination | None:
+def destination(config: SheetsConfig | None, target_date: date | None = None) -> SheetDestination | None:
     """The write target, or ``None`` when the operator has not finished configuring it."""
-    if config is None or not config.spreadsheet_id or not config.worksheet:
+    if config is None or not config.spreadsheet_id:
         return None
-    return SheetDestination(spreadsheet_id=config.spreadsheet_id, worksheet=config.worksheet)
+    tab = (config.worksheet or "").strip()
+    if not tab or tab.lower() in ("auto", "today", "date"):
+        d = target_date or datetime.now(UTC).date()
+        tab = d.isoformat()
+    return SheetDestination(spreadsheet_id=config.spreadsheet_id, worksheet=tab)
 
 
 def parse_spreadsheet_reference(text: str) -> str:
@@ -185,19 +190,17 @@ def upsert_config(session: Session, data: Mapping[str, Any], *, now: datetime) -
 
     if "spreadsheet_id" in data and data["spreadsheet_id"] is not None:
         config.spreadsheet_id = parse_spreadsheet_reference(str(data["spreadsheet_id"]))
-    if "worksheet" in data and data["worksheet"] is not None:
-        tab = str(data["worksheet"]).strip()
-        if not tab:
-            raise SheetsConfigError(
-                "A worksheet name is required. It is the tab at the bottom of the "
-                "spreadsheet, not its title.",
-                code="missing_worksheet",
-            )
-        if len(tab) > 128 or any(c in tab for c in "![]"):
-            raise SheetsConfigError(
-                f"{tab!r} is not a usable worksheet name.", code="invalid_worksheet"
-            )
-        config.worksheet = tab
+    if "worksheet" in data:
+        raw_tab = data["worksheet"]
+        tab = str(raw_tab).strip() if raw_tab is not None else ""
+        if not tab or tab.lower() in ("auto", "today", "date"):
+            config.worksheet = "auto"
+        else:
+            if len(tab) > 128 or any(c in tab for c in "![]"):
+                raise SheetsConfigError(
+                    f"{tab!r} is not a usable worksheet name.", code="invalid_worksheet"
+                )
+            config.worksheet = tab
     if "report_timezone" in data and data["report_timezone"] is not None:
         config.report_timezone = str(data["report_timezone"]).strip() or "UTC"
     if "cutoff_time" in data and data["cutoff_time"] is not None:
@@ -220,6 +223,8 @@ def upsert_config(session: Session, data: Mapping[str, Any], *, now: datetime) -
                 code="no_destination",
             )
         config.enabled = wanted
+    elif destination(config) is not None and not config.enabled and ("spreadsheet_id" in data or "worksheet" in data):
+        config.enabled = True
     if "connection_id" in data:
         config.connection_id = data["connection_id"]
 
@@ -304,12 +309,25 @@ def _sheets_connection(session: Session, config: SheetsConfig) -> PlatformConnec
     return connection
 
 
-def _connector_for(ctx: AppContext, session: Session, config: SheetsConfig):
+def _connector_for(
+    ctx: AppContext,
+    session: Session,
+    config: SheetsConfig,
+    *,
+    now: datetime | None = None,
+):
     connection = _sheets_connection(session, config)
+    now = now or datetime.now(UTC)
     key = f"conn:{connection.public_id}"
     access = ctx.credentials.read(f"{key}:access")
-    if not access:
-        refresh = ctx.credentials.read(f"{key}:refresh")
+    refresh = ctx.credentials.read(f"{key}:refresh")
+
+    is_expired = (
+        connection.token_expires_at is not None
+        and connection.token_expires_at <= now + timedelta(seconds=60)
+    )
+
+    if not access or (is_expired and refresh):
         if not refresh:
             raise SheetsUnconfigured(
                 "No credential is stored for the reporting connection. This is a "
@@ -334,6 +352,13 @@ def _connector_for(ctx: AppContext, session: Session, config: SheetsConfig):
         # reconnected it by hand.
         if tokens.refresh_token and tokens.refresh_token != refresh:
             ctx.credentials.write(f"{key}:refresh", tokens.refresh_token)
+        if tokens.expires_in:
+            connection.token_expires_at = now + timedelta(seconds=tokens.expires_in)
+        connection.last_token_check_at = now
+        connection.last_token_check_ok = True
+        if connection.status == "expired":
+            connection.status = "active"
+        session.flush()
         access = tokens.access_token
     return ctx.sheets(access)
 
@@ -423,6 +448,49 @@ def _latest_remote_state(session: Session, job: ScheduledJob) -> RemoteState | N
         return None
 
 
+def _format_time(dt: datetime | None, tz_name: str) -> str:
+    if dt is None:
+        return "—"
+    try:
+        from zoneinfo import ZoneInfo
+
+        zone = ZoneInfo(tz_name)
+    except Exception:
+        zone = UTC
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(zone).strftime("%I:%M %p")
+
+
+def _format_status(job: ScheduledJob) -> str:
+    try:
+        st = JobState(job.state)
+    except ValueError:
+        return str(job.state).replace("JOB-", "").title()
+
+    if st is JobState.SCHEDULED:
+        return "Scheduled"
+    if st is JobState.PUBLISHED:
+        return "Published"
+    if st is JobState.UPLOADING:
+        return "Uploading"
+    if st is JobState.DRAFT:
+        return "Draft"
+    if st is JobState.READY:
+        return "Ready"
+    if st is JobState.FAILED:
+        return "Failed"
+    if st is JobState.NEEDS_REVIEW:
+        return "Needs Review"
+    if st is JobState.CANCELLED:
+        return "Cancelled"
+    if st is JobState.MISSED_WINDOW:
+        return "Missed Window"
+    if st is JobState.BLOCKED:
+        return "Blocked"
+    return st.value.replace("JOB-", "").title()
+
+
 def build_row(
     session: Session,
     job: ScheduledJob,
@@ -444,7 +512,39 @@ def build_row(
     )
     schedule_id = job.public_id
 
+    # Daily serial number starting from 1
+    day_jobs = [
+        j for j in eligible_jobs(session, config)
+        if report_date_of_job(j, config) == report_date
+    ]
+    day_jobs.sort(
+        key=lambda j: (
+            j.schedule.publish_at_utc if j.schedule and j.schedule.publish_at_utc else datetime.min.replace(tzinfo=UTC),
+            j.id or 0,
+        )
+    )
+    try:
+        sl_num = str(day_jobs.index(job) + 1)
+    except ValueError:
+        sl_num = "1"
+
+    sched_time = (
+        _format_time(job.schedule.publish_at_utc, config.report_timezone)
+        if job.schedule and job.schedule.publish_at_utc
+        else "—"
+    )
+    ch_title = channel.title if channel and channel.title else (channel.custom_url if channel and channel.custom_url else "")
+    v_url = job.video_url or (f"https://www.youtube.com/watch?v={job.video_id}" if job.video_id else "")
+    up_status = _format_status(job)
+    up_time = _format_time(job.published_at_remote or job.uploaded_at, config.report_timezone)
+
     row: dict[str, str] = {
+        "SL": sl_num,
+        "Time": sched_time,
+        "Channel": ch_title,
+        "Video URL": v_url,
+        "Upload Status": up_status,
+        "Upload Time": up_time,
         KEY_COLUMN: make_sync_key(report_date, schedule_id, SCHEMA_VERSION),
         "Schedule ID": schedule_id,
         "Report Date": report_date.isoformat(),
@@ -585,6 +685,12 @@ def build_summary_row(
     """One daily summary row. Uses the same key column so it deduplicates identically."""
     total = sum(counts.values())
     return {
+        "SL": "",
+        "Time": "",
+        "Channel": channel_id,
+        "Video URL": "",
+        "Upload Status": "Daily Summary",
+        "Upload Time": "",
         KEY_COLUMN: make_summary_sync_key(report_date, channel_id, SCHEMA_VERSION),
         "Report Date": report_date.isoformat(),
         "Schedule ID": f"(daily summary · {channel_id})",
@@ -733,7 +839,7 @@ def sync_once(
         return SyncSummary(ok=False, diagnostic="; ".join(problems))
 
     try:
-        connector = _connector_for(ctx, session, config)
+        connector = _connector_for(ctx, session, config, now=now)
     except SheetsUnconfigured as exc:
         return SyncSummary(ok=False, diagnostic=str(exc))
     except Exception as exc:
@@ -743,57 +849,81 @@ def sync_once(
     target = destination(config)
     assert target is not None  # guarded by validate_config
 
-    # --- 1. read ---------------------------------------------------------
-    try:
-        remote_keys = set(connector.read_sync_keys(target))
-    except SheetError as exc:
-        return SyncSummary(ok=False, diagnostic=f"Could not read the destination: {exc}")
+    def _target_for(rec: Any) -> SheetDestination:
+        ws = (config.worksheet or "").strip()
+        if not ws or ws.lower() in ("auto", "today", "date"):
+            try:
+                parsed = parse_sync_key(rec.sync_key)
+                tab_name = parsed.report_date.isoformat()
+            except Exception:
+                tab_name = (now or datetime.now(UTC)).date().isoformat()
+        else:
+            tab_name = ws
+        return SheetDestination(spreadsheet_id=config.spreadsheet_id, worksheet=tab_name)
 
-    # --- 2. compare ------------------------------------------------------
     records = list(_pending_records(session)) + list(_pending_summaries(session))
-    to_append = [r for r in records if r.sync_key not in remote_keys]
-    present = [r for r in records if r.sync_key in remote_keys]
-    known = {r.sync_key for r in records}
 
-    # ``already_present`` counts every pending row the destination already held;
-    # ``adopted_from_destination`` counts how many of those the local ledger then
-    # caught up with. They differ only in that a skipped-by-the-writer key still
-    # needs the local status advanced, which ``_resolve_present`` does.
-    result = SyncSummary(already_present=len(present))
-    result.foreign_keys = sorted(k for k in remote_keys if k and k not in known)
-    _resolve_present(session, present, now=now, result=result)
+    by_target: dict[SheetDestination, list[Any]] = {}
+    for r in records:
+        dest = _target_for(r)
+        by_target.setdefault(dest, []).append(r)
 
-    if not to_append:
-        config.last_sync_at = now
-        config.last_sync_status = "ok"
-        config.last_sync_error = None
-        config.last_sync_foreign_keys = list(result.foreign_keys)
-        session.flush()
-        return result
+    if not by_target:
+        by_target[target] = []
 
-    # --- 3. append, once -------------------------------------------------
-    result.attempted = len(to_append)
-    ordered = sorted(to_append, key=lambda r: r.sync_key)
-    payloads = [_row_for(r) for r in ordered]
+    result = SyncSummary()
 
-    try:
-        write: SheetWrite = connector.append_rows(target, payloads)
-    except SheetError as exc:
-        _handle_append_failure(
-            session,
-            connector,
-            target,
-            ordered,
-            exc,
-            now=now,
-            result=result,
-        )
-    else:
-        _mark_synced(
-            session, [r for r in ordered if r.sync_key in set(write.appended_keys)], now=now
-        )
-        result.appended = len(write.appended_keys)
-        result.already_present += len(write.skipped_keys)
+    for dest_target, target_records in by_target.items():
+        # --- 1. read ---------------------------------------------------------
+        try:
+            remote_keys = set(connector.read_sync_keys(dest_target))
+        except SheetError as exc:
+            return SyncSummary(ok=False, diagnostic=f"Could not read the destination: {exc}")
+
+        # --- 2. compare ------------------------------------------------------
+        to_append = [r for r in target_records if r.sync_key not in remote_keys]
+        present = [r for r in target_records if r.sync_key in remote_keys]
+        known = {r.sync_key for r in target_records}
+
+        result.already_present += len(present)
+        target_foreign = sorted(k for k in remote_keys if k and k not in known)
+        result.foreign_keys = sorted(set(result.foreign_keys + target_foreign))
+
+        # Update live status on existing rows if supported by connector
+        if hasattr(connector, "update_rows") and present:
+            try:
+                connector.update_rows(dest_target, [_row_for(r) for r in present if r.payload])
+            except Exception as exc:
+                log.debug("Live row update failed: %s", exc)
+
+        _resolve_present(session, present, now=now, result=result)
+
+        if not to_append:
+            continue
+
+        # --- 3. append, once -------------------------------------------------
+        result.attempted += len(to_append)
+        ordered = sorted(to_append, key=lambda r: r.sync_key)
+        payloads = [_row_for(r) for r in ordered]
+
+        try:
+            write: SheetWrite = connector.append_rows(dest_target, payloads)
+        except SheetError as exc:
+            _handle_append_failure(
+                session,
+                connector,
+                dest_target,
+                ordered,
+                exc,
+                now=now,
+                result=result,
+            )
+        else:
+            _mark_synced(
+                session, [r for r in ordered if r.sync_key in set(write.appended_keys)], now=now
+            )
+            result.appended += len(write.appended_keys)
+            result.already_present += len(write.skipped_keys)
 
     # --- 4. record the outcome -------------------------------------------
     result.ok = result.ambiguous_unresolved == 0 and not result.failures
@@ -925,7 +1055,7 @@ def verify_access(ctx: AppContext, session: Session, *, now: datetime) -> tuple[
     if target is None:
         return False, "Choose a spreadsheet and worksheet first."
     try:
-        connector = _connector_for(ctx, session, config)
+        connector = _connector_for(ctx, session, config, now=now)
     except SheetsUnconfigured as exc:
         return False, str(exc)
     except Exception as exc:
@@ -948,7 +1078,7 @@ def test_write(ctx: AppContext, session: Session, *, now: datetime) -> tuple[boo
     if target is None:
         return False, "Choose a spreadsheet and worksheet first."
     try:
-        connector = _connector_for(ctx, session, config)
+        connector = _connector_for(ctx, session, config, now=now)
     except SheetsUnconfigured as exc:
         return False, str(exc)
     except Exception as exc:
@@ -1058,11 +1188,11 @@ def health(ctx: AppContext, session: Session, *, now: datetime) -> dict[str, Any
         "last_sync_at": config.last_sync_at if config else None,
         "last_sync_status": config.last_sync_status if config else None,
         "last_sync_error": config.last_sync_error if config else None,
-        "outbox_pending": int(undelivered),
-        "outbox_synced": int(synced),
-        "outbox_failed": int(failed),
-        "outbox_ambiguous": int(ambiguous),
-        "outbox_total": int(undelivered) + int(synced),
+        "outbox_pending": undelivered,
+        "outbox_synced": synced,
+        "outbox_failed": failed,
+        "outbox_ambiguous": ambiguous,
+        "outbox_total": undelivered + synced,
         # Captured by the last pass rather than looked up now — see this function's
         # docstring. Empty means "none seen", not "none exist".
         "foreign_keys": list(config.last_sync_foreign_keys or []) if config else [],

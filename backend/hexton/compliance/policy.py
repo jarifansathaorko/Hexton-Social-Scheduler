@@ -251,6 +251,7 @@ class DiagnosticCode(str, Enum):
     DISABLED = "disabled"  # connected, but switched off by the operator
     POLICY_NOT_ACCEPTED = "policy_not_accepted"  # the gate is closed
     CREDENTIAL_UNUSABLE = "credential_unusable"  # stored, but expired/revoked/invalid
+    QUOTA_EXHAUSTED = "quota_exhausted"  # daily quota budget spent; deferred until Pacific midnight
     REMOTE_FAILED = "remote_failed"  # the credential was fine; the request failed
     OK = "ok"
 
@@ -280,6 +281,7 @@ def diagnose(
     enabled: bool = True,
     credential_present: bool = True,
     credential_expired: bool = False,
+    quota_exhausted: bool = False,
     remote_error: str = "",
 ) -> Diagnostic:
     """Classify the state of a connection. Order matters: earliest cause wins."""
@@ -305,6 +307,12 @@ def diagnose(
             DiagnosticCode.CREDENTIAL_UNUSABLE,
             "The stored credential can no longer authorize a request. Reauthorize in "
             "Settings; the remote service was not asked to do anything.",
+        )
+    if quota_exhausted:
+        return Diagnostic(
+            DiagnosticCode.QUOTA_EXHAUSTED,
+            "The daily quota window is exhausted. Automatic requests are paused until midnight Pacific.",
+            retry_worthwhile=True,
         )
     if remote_error:
         return Diagnostic(

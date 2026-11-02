@@ -4,6 +4,7 @@ import { useJob, useJobDetailActions } from "../hooks/jobActions";
 import { usePolicyStatus, useSheetsOutbox } from "../hooks/api";
 import { MentionPanel } from "./MentionPanel";
 import { ProgressBar, StatusBadge } from "./StatusBadge";
+import { IconChevronDown, IconExternalLink } from "./Icons";
 import { MENTION_NAMES, REMOTE_NAMES, formatBytes, formatDuration, formatWhen } from "../lib/state";
 
 /**
@@ -64,7 +65,6 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
     events,
     observations,
     upload_sessions,
-    allowed_transitions,
     candidates,
     can_requeue,
   } = detail.data;
@@ -93,7 +93,8 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
         <div className="min-w-0">
           <h2 className="truncate text-lg font-semibold">{job.title || "(untitled)"}</h2>
           <p className="mt-1 text-xs text-ink-faint">
-            {job.public_id} · {allowed_transitions.length} legal next states
+            {job.channel_title ? job.channel_title : "No channel selected"}
+            {job.publish_at_utc ? ` · Scheduled for ${formatWhen(job.publish_at_utc)}` : ""}
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -113,6 +114,27 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
           <StatusBadge job={job} />
           {active && <ProgressBar percent={job.progress_percent} active />}
         </section>
+
+        {job.video_id && (
+          <section className="rounded-xl border border-edge bg-[var(--hs-surface-raised)]/60 p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted">YouTube Video</span>
+                <p className="font-mono text-xs text-ink mt-0.5">{job.video_id}</p>
+              </div>
+              {job.video_url && (
+                <a
+                  className="btn btn-primary py-1.5 px-3 text-xs flex items-center gap-1.5 shadow-sm"
+                  href={job.video_url}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  Watch on YouTube <IconExternalLink size={12} />
+                </a>
+              )}
+            </div>
+          </section>
+        )}
 
         <Facts
           facts={[
@@ -154,40 +176,22 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
             ["Source clip", `${job.media_name} · ${formatBytes(job.media_size_bytes)}${job.media_duration_seconds !== null ? ` · ${formatDuration(job.media_duration_seconds)}` : ""}`],
             ["Container", job.media_container ?? "—"],
             ["Tags", job.tags.length ? job.tags.join(", ") : "—"],
-            [
-              "Mentions",
-              job.mention_requested
-                ? `${MENTION_NAMES[job.mention_state]}${job.mention_handles.length ? ` (${job.mention_handles.map((h) => `@${h}`).join(", ")})` : ""}`
-                : "None requested",
-            ],
-            [
-              "Manual mention confirmation",
-              job.mention_requested && job.mention_state === "manual_required" ? "Required" : "Not required",
-            ],
+            ...(job.mention_requested
+              ? [
+                  [
+                    "Mentions",
+                    `${MENTION_NAMES[job.mention_state]}${job.mention_handles.length ? ` (${job.mention_handles.map((h) => `@${h}`).join(", ")})` : ""}`,
+                  ] as [string, string],
+                  [
+                    "Manual mention confirmation",
+                    job.mention_state === "manual_required" ? "Required" : "Not required",
+                  ] as [string, string],
+                ]
+              : []),
           ]}
         />
 
         <MentionPanel job={job} actions={actions} />
-
-        {job.video_id && (
-          <section className="rounded-md border border-edge bg-canvas p-3">
-            <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">Video</h3>
-            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
-              <dt className="text-ink-faint">ID</dt>
-              <dd className="font-mono text-xs">{job.video_id}</dd>
-              <dt className="text-ink-faint">URL</dt>
-              <dd>
-                {job.video_url ? (
-                  <a className="text-cue-progress hover:underline" href={job.video_url} target="_blank" rel="noreferrer noopener">
-                    {job.video_url}
-                  </a>
-                ) : (
-                  "—"
-                )}
-              </dd>
-            </dl>
-          </section>
-        )}
 
         {job.failure_message && (
           <section className="rounded-md border border-cue-warning/40 bg-cue-warning/5 p-3">
@@ -201,29 +205,44 @@ export function JobDetails({ jobId, onClose }: { jobId: number; onClose: () => v
           </section>
         )}
 
-        <Actions job={job} actions={actions} adoptable={adoptable} can_requeue={can_requeue} />
+        <Actions
+          job={job}
+          actions={actions}
+          adoptable={adoptable}
+          can_requeue={can_requeue}
+          onClose={onClose}
+        />
 
-        {upload_sessions.length > 0 && (
-          <section>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">
-              Resumable sessions
-            </h3>
-            <ul className="mt-2 flex flex-col gap-1 text-xs text-ink-muted">
-              {upload_sessions.map((s) => (
-                <li key={s.id} className="rounded border border-edge px-2 py-1.5">
-                  <span className="text-ink">{s.phase}</span> · {formatBytes(s.bytes_uploaded)} of{" "}
-                  {formatBytes(s.total_bytes)} · attempt {s.attempt}
-                  {s.insert_may_have_succeeded && (
-                    <span className="text-cue-attention"> · outcome uncertain</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </section>
-        )}
+        {/* Technical logs collapsed by default so UI stays simplistic and clean */}
+        <details className="group rounded-xl border border-edge bg-[var(--hs-surface-soft)]/40 overflow-hidden">
+          <summary className="cursor-pointer select-none px-4 py-3 text-xs font-semibold uppercase tracking-wider text-ink-muted hover:text-white flex items-center justify-between transition-colors">
+            <span>Technical Logs & Audit Details ({events.length} events)</span>
+            <IconChevronDown size={14} className="transition-transform group-open:rotate-180" />
+          </summary>
+          <div className="flex flex-col gap-4 border-t border-edge p-4">
+            {upload_sessions.length > 0 && (
+              <section>
+                <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">
+                  Resumable sessions
+                </h3>
+                <ul className="mt-2 flex flex-col gap-1 text-xs text-ink-muted">
+                  {upload_sessions.map((s) => (
+                    <li key={s.id} className="rounded border border-edge px-2 py-1.5">
+                      <span className="text-ink">{s.phase}</span> · {formatBytes(s.bytes_uploaded)} of{" "}
+                      {formatBytes(s.total_bytes)} · attempt {s.attempt}
+                      {s.insert_may_have_succeeded && (
+                        <span className="text-cue-attention"> · outcome uncertain</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
 
-        <Observations observations={observations} />
-        <EventLog events={events} />
+            <Observations observations={observations} />
+            <EventLog events={events} />
+          </div>
+        </details>
       </div>
     </aside>
   );
@@ -234,6 +253,7 @@ function Actions({
   actions,
   adoptable,
   can_requeue,
+  onClose,
 }: {
   job: Job;
   actions: ReturnType<typeof useJobDetailActions>;
@@ -241,8 +261,37 @@ function Actions({
   adoptable: string[];
   /** Whether re-running the job is a meaningful remaining action (F-04). */
   can_requeue: boolean;
+  onClose: () => void;
 }) {
+  const isUploading = job.state === "JOB-UPLOADING";
   const terminal = job.state === "JOB-PUBLISHED" || job.state === "JOB-CANCELLED";
+
+  const handleDelete = () => {
+    const confirmMsg = job.video_id
+      ? `Are you sure you want to delete this job? This will delete video ${job.video_id} from YouTube and remove it from Hexton.`
+      : "Are you sure you want to delete this job from Hexton?";
+    if (window.confirm(confirmMsg)) {
+      actions.remove.mutate(
+        { id: job.id, deleteRemote: true },
+        {
+          onSuccess: () => {
+            onClose();
+          },
+        }
+      );
+    }
+  };
+
+  const handleCancel = () => {
+    actions.cancel.mutate({
+      id: job.id,
+      body: {
+        delete_remote: Boolean(job.video_id),
+        reason: "Cancelled from the details panel.",
+      },
+    });
+  };
+
   return (
     <section>
       <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">Actions</h3>
@@ -278,25 +327,13 @@ function Actions({
           <button
             className="btn btn-danger"
             disabled={actions.cancel.isPending}
-            onClick={() =>
-              actions.cancel.mutate({
-                id: job.id,
-                body: { delete_remote: job.video_id !== null, reason: "Cancelled from the details panel." },
-              })
-            }
+            onClick={handleCancel}
           >
-            Cancel job
+            {actions.cancel.isPending ? "Cancelling..." : "Cancel job"}
           </button>
         )}
         {(job.state === "JOB-NEEDS_REVIEW" || job.insert_may_have_succeeded) && (
           <>
-            {/*
-              The candidates come from the backend's reconciliation ladder, not from
-              `job.video_id`. When a `videos.insert` outcome is unknown the job's own
-              `video_id` is exactly the thing that is missing, so a panel that only
-              offered "This video is mine" against a value that is null in the
-              ambiguous case offered nothing at all (F-04).
-            */}
             {adoptable.map((candidate) => (
               <button
                 key={candidate}
@@ -326,14 +363,6 @@ function Actions({
                 This video is mine
               </button>
             )}
-            {/*
-              Two honest answers, not one. "None of these are mine" used to be the only
-              rejection there was, and it always meant *cancel* — so an operator who had
-              checked YouTube, found no upload, and wanted the job to run again had no
-              button at all and the schedule was permanently stranded (F-04). Cancelling
-              stays: rejecting a candidate and killing the schedule are different
-              decisions and only the operator knows which one they meant.
-            */}
             <button
               className="btn"
               disabled={actions.reconcile.isPending}
@@ -359,16 +388,53 @@ function Actions({
             )}
           </>
         )}
-        {(job.state === "JOB-DRAFT" || job.state === "JOB-CANCELLED") && (
+        {!isUploading && (
           <button
-            className="btn"
+            className="btn btn-danger"
             disabled={actions.remove.isPending}
-            onClick={() => actions.remove.mutate(job.id)}
+            onClick={handleDelete}
+            title={job.video_id ? "Delete job and delete video from YouTube" : "Delete job from Hexton"}
           >
-            Delete
+            {actions.remove.isPending ? "Deleting..." : "Delete"}
           </button>
         )}
       </div>
+
+      {(actions.cancel.error || actions.remove.error) && (
+        <div className="mt-3 rounded-xl border border-rose-500/40 bg-rose-500/10 p-3.5 text-xs text-rose-300">
+          <div className="font-semibold text-rose-200">
+            {actions.remove.error ? "Delete Notice" : "Cancellation Notice"}
+          </div>
+          <div className="mt-1">
+            {actions.remove.error?.message || actions.cancel.error?.message}
+          </div>
+          {((actions.remove.error?.message || actions.cancel.error?.message || "").includes("403") ||
+            (actions.remove.error?.message || actions.cancel.error?.message || "").includes("permission")) && (
+            <div className="mt-2.5 flex flex-wrap items-center gap-2">
+              <a
+                href="#/channels"
+                className="inline-flex items-center rounded-lg bg-rose-500/25 px-2.5 py-1 text-xs font-semibold text-rose-200 border border-rose-500/40 hover:bg-rose-500/40 transition-colors"
+              >
+                Reconnect Channel in YouTube Channels
+              </a>
+              {actions.remove.error && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    actions.remove.mutate(
+                      { id: job.id, deleteRemote: false, force: true },
+                      { onSuccess: () => onClose() }
+                    );
+                  }}
+                  className="text-xs text-[var(--hs-text-muted)] hover:text-white underline cursor-pointer"
+                >
+                  Force delete from Hexton only
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {job.state === "JOB-NEEDS_REVIEW" && (
         <div className="mt-2 rounded-md border border-cue-attention/50 bg-cue-attention/10 px-3 py-2 text-xs text-cue-attention">
           <p className="font-medium">

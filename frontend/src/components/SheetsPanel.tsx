@@ -81,7 +81,7 @@ export function SheetsPanel({ connections }: { connections: Connection[] }) {
       {health.data && <HealthPanel health={health.data} />}
 
       <div className="mt-5 border-t border-edge pt-4">
-        <SyncControls connectionId={config.data?.connection_id ?? 2} />
+        <SyncControls connectionId={config.data?.connection_id ?? 2} config={config.data} />
       </div>
 
       {outbox.data && outbox.data.rows.length > 0 && <Outbox rows={outbox.data.rows} />}
@@ -174,9 +174,17 @@ function ConfigForm({
           Worksheet tab
           <input
             className="input text-sm"
-            value={draft.worksheet ?? ""}
-            onChange={(event) => setDraft({ ...draft, worksheet: event.target.value })}
+            placeholder="Auto (creates daily tab: YYYY-MM-DD)"
+            value={draft.worksheet === "auto" ? "" : (draft.worksheet ?? "")}
+            onChange={(event) =>
+              setDraft({ ...draft, worksheet: event.target.value.trim() ? event.target.value : "auto" })
+            }
           />
+          <span className="text-[11px] font-normal text-emerald-600 dark:text-emerald-400">
+            {(!draft.worksheet || draft.worksheet === "auto")
+              ? "✨ Daily tab mode: Automatically creates a new tab for each date (e.g. 2026-10-28)."
+              : "Custom tab specified."}
+          </span>
         </label>
 
         <label className="flex flex-col gap-1 text-xs font-medium text-ink">
@@ -192,7 +200,7 @@ function ConfigForm({
           Day cut-over (local time)
           <input
             className="input text-sm"
-            placeholder="03:00"
+            placeholder="00:00"
             value={draft.cutoff_time}
             onChange={(event) => setDraft({ ...draft, cutoff_time: event.target.value })}
           />
@@ -219,25 +227,34 @@ function ConfigForm({
               ))}
             </select>
           </label>
-          {selectedConn && selectedConn.status !== "active" && (
-            <div className="mt-1 flex items-center gap-2">
-              <span className="text-xs text-cue-warning">Not authorized with Google yet.</span>
-              <button
-                type="button"
-                className="btn text-xs px-2.5 py-1"
-                disabled={authorize.isPending}
-                onClick={() =>
-                  authorize.mutate(selectedConn.id, {
-                    onSuccess: (data) => {
-                      if (data?.authorization_url) {
-                        window.location.href = data.authorization_url;
-                      }
-                    },
-                  })
-                }
-              >
-                {authorize.isPending ? "Connecting…" : "Authorize with Google"}
-              </button>
+          {selectedConn && (selectedConn.status !== "active" || !(selectedConn.scopes?.some((s: string) => s.includes("spreadsheets")) ?? false)) && (
+            <div className="mt-1 flex flex-col gap-1.5">
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-cue-warning">
+                  {!(selectedConn.scopes?.some((s: string) => s.includes("spreadsheets")) ?? false)
+                    ? "Needs Google Spreadsheets permission."
+                    : "Not authorized with Google yet."}
+                </span>
+                <button
+                  type="button"
+                  className="btn text-xs px-2.5 py-1 font-medium bg-cue-attention/10 text-cue-attention hover:bg-cue-attention/20"
+                  disabled={authorize.isPending}
+                  onClick={() =>
+                    authorize.mutate(selectedConn.id, {
+                      onSuccess: (data) => {
+                        if (data?.authorization_url) {
+                          window.location.href = data.authorization_url;
+                        }
+                      },
+                    })
+                  }
+                >
+                  {authorize.isPending ? "Connecting…" : "Authorize Google Sheets"}
+                </button>
+              </div>
+              <p className="text-[11px] text-ink-faint">
+                💡 Make sure your Google Spreadsheet is shared with this account (with <strong>Editor</strong> access).
+              </p>
             </div>
           )}
         </div>
@@ -266,29 +283,62 @@ function ConfigForm({
         </div>
       </div>
 
-      {optional.length > 0 && (
-        <fieldset className="border-t border-edge pt-3">
-          <legend className="text-xs font-medium text-ink">Optional columns</legend>
-          <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
-            {optional.map((column) => (
-              <label key={column} className="flex items-center gap-1.5 text-xs text-ink-muted">
-                <input
-                  type="checkbox"
-                  checked={draft.include_optional_columns.includes(column)}
-                  onChange={(event) =>
-                    setDraft({
-                      ...draft,
-                      include_optional_columns: event.target.checked
-                        ? [...draft.include_optional_columns, column]
-                        : draft.include_optional_columns.filter((c) => c !== column),
-                    })
-                  }
-                />
-                {column}
-              </label>
-            ))}
+      <div className="rounded-md border border-edge bg-canvas/40 p-3 mt-1">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-semibold text-ink">📊 Live Sheet Columns (Automatic)</span>
+          <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">
+            ✓ Simplified Creator Format
+          </span>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-ink-muted sm:grid-cols-3">
+          <div className="flex items-center gap-1.5">
+            <span className="text-ok">●</span> <strong>SL</strong> (Daily: 1, 2, 3…)
           </div>
-        </fieldset>
+          <div className="flex items-center gap-1.5">
+            <span className="text-ok">●</span> <strong>Time</strong> (Scheduled time)
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-ok">●</span> <strong>Channel</strong> (Target channel)
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-ok">●</span> <strong>Video URL</strong> (YouTube link)
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-ok">●</span> <strong>Upload Status</strong> (Live: Scheduled → Published)
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-ok">●</span> <strong>Upload Time</strong> (Published time)
+          </div>
+        </div>
+      </div>
+
+      {optional.length > 0 && (
+        <details className="mt-1 text-xs">
+          <summary className="cursor-pointer text-xs font-medium text-ink-muted hover:text-ink">
+            Advanced / Extra Optional Columns ({optional.length})
+          </summary>
+          <fieldset className="mt-2 border-t border-edge pt-2">
+            <div className="flex flex-wrap gap-x-4 gap-y-1">
+              {optional.map((column) => (
+                <label key={column} className="flex items-center gap-1.5 text-xs text-ink-muted">
+                  <input
+                    type="checkbox"
+                    checked={draft.include_optional_columns.includes(column)}
+                    onChange={(event) =>
+                      setDraft({
+                        ...draft,
+                        include_optional_columns: event.target.checked
+                          ? [...draft.include_optional_columns, column]
+                          : draft.include_optional_columns.filter((c) => c !== column),
+                      })
+                    }
+                  />
+                  {column}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+        </details>
       )}
 
       {required.length > 0 && (
@@ -379,12 +429,28 @@ function HealthPanel({ health }: { health: SheetsHealth }) {
   );
 }
 
-function SyncControls({ connectionId }: { connectionId: number | null }) {
+function SyncControls({
+  connectionId,
+  config,
+}: {
+  connectionId: number | null;
+  config?: SheetsConfig;
+}) {
   const verify = useVerifySheets();
   const testWrite = useTestWriteSheets();
   const sync = useSyncSheets();
+  const save = useSaveSheetsConfig();
   const authorize = useAuthorizeConnection();
-  const pending = verify.isPending || testWrite.isPending || sync.isPending;
+  const pending = verify.isPending || testWrite.isPending || sync.isPending || save.isPending;
+
+  const handleSync = async () => {
+    if (config && !config.enabled && config.spreadsheet_id && config.worksheet) {
+      try {
+        await save.mutateAsync({ ...config, enabled: true });
+      } catch {}
+    }
+    sync.mutate();
+  };
 
   const errorObj = verify.error ?? testWrite.error ?? sync.error;
   const errorMessage = errorObj instanceof ApiError ? errorObj.message : errorObj ? "That did not go through." : null;
@@ -401,8 +467,8 @@ function SyncControls({ connectionId }: { connectionId: number | null }) {
         <button className="btn" disabled={pending} onClick={() => testWrite.mutate()}>
           {testWrite.isPending ? "Writing…" : "Write a test row"}
         </button>
-        <button className="btn" disabled={pending} onClick={() => sync.mutate()}>
-          {sync.isPending ? "Syncing…" : "Sync now"}
+        <button className="btn" disabled={pending} onClick={handleSync}>
+          {sync.isPending || save.isPending ? "Syncing…" : "Sync now"}
         </button>
       </div>
 

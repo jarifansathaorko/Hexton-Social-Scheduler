@@ -127,3 +127,50 @@ def test_a_naive_timestamp_is_treated_as_local_time_not_rejected() -> None:
     from an aware ``now`` everywhere in the application, so this path never sees one."""
     naive = datetime(2026, 10, 11, 6, 0)
     assert quota.window_start(naive).tzinfo is not None
+
+
+def test_granular_quota_bucket_estimation() -> None:
+    insert_est = quota.estimate_operation_cost("videos.insert")
+    assert insert_est.bucket == quota.QuotaBucket.UPLOAD
+    assert insert_est.local_ledger_units == 1
+    assert insert_est.live_estimated_units == 1600
+
+    update_est = quota.estimate_operation_cost("videos.update")
+    assert update_est.bucket == quota.QuotaBucket.MUTATION
+    assert update_est.local_ledger_units == 50
+    assert update_est.live_estimated_units == 50
+
+    search_est = quota.estimate_operation_cost("search.list")
+    assert search_est.bucket == quota.QuotaBucket.SEARCH
+    assert search_est.live_estimated_units == 100
+
+    read_est = quota.estimate_operation_cost("channels.list")
+    assert read_est.bucket == quota.QuotaBucket.READ
+    assert read_est.live_estimated_units == 1
+
+
+def test_quota_exhausted_formatted_message() -> None:
+    now = datetime(2026, 10, 11, 6, 0, tzinfo=UTC)
+    msg = quota.format_quota_exhausted_message("youtube", "videos.insert", now)
+    assert "upload" in msg
+    assert "Pacific" in msg
+    assert "deferred" in msg
+
+
+def test_quota_summary_status(ctx) -> None:
+    now = datetime(2026, 10, 11, 6, 0, tzinfo=UTC)
+    summary = quota.get_quota_summary(ctx.engine, "youtube", now)
+    assert summary.daily_budget == 10_000
+    assert summary.units_used == 0
+    assert summary.can_upload is True
+    assert summary.can_read is True
+    assert summary.can_mutate is True
+    assert summary.is_exhausted is False
+
+    # Spend almost all budget
+    quota.add_units(ctx.engine, "youtube", 9850, now)
+    summary_warn = quota.get_quota_summary(ctx.engine, "youtube", now)
+    assert summary_warn.units_remaining == 150
+    assert summary_warn.is_warning is True
+    assert summary_warn.can_upload is False  # below reserve
+    assert summary_warn.is_exhausted is True

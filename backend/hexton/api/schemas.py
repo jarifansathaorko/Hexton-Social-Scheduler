@@ -78,6 +78,14 @@ class MediaAddIn(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
 
+class MediaPickIn(BaseModel):
+    initial_dir: str | None = None
+
+
+class MediaPickOut(BaseModel):
+    path: str | None
+
+
 class MediaOut(ORMModel):
     id: int
     path: str
@@ -255,6 +263,10 @@ class JobOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     cancelled_at: datetime | None
+    view_count: int = 0
+    like_count: int = 0
+    comment_count: int = 0
+    last_stats_synced_at: datetime | None = None
 
 
 class JobDetailOut(BaseModel):
@@ -381,3 +393,14 @@ class DashboardOut(BaseModel):
     uploading: list[JobOut]
     quota_remaining: int
     worker_alive: bool
+
+
+class ChannelSearchResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    channel_id: str
+    title: str
+    handle: str
+    thumbnail_url: str = ""
+    subscriber_count: str = ""
+    verified: bool = False

@@ -9,34 +9,40 @@ text is stored verbatim, and no credential ever appears in a response.
 
 from __future__ import annotations
 
+from collections.abc import Generator
 from datetime import timedelta
+from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from conftest import BASE, FUTURE, PAST, make_media
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from hexton.api.app import create_app
+from hexton.api.deps import AppContext
 from hexton.api.security import COOKIE_SECURE, CSRF_HEADER, SessionSigner
 from hexton.bootstrap import load_or_create_session_key
-from hexton.db.models import ChannelIdentity, ScheduledJob
+from hexton.db.models import ChannelIdentity, PlatformConnection, ScheduledJob
+from sqlalchemy.orm import Session
 
 ACCESS_SECRET = "access-token"
 REFRESH_SECRET = "refresh-token"
 
 
 @pytest.fixture
-def app(ctx, tmp_path):
+def app(ctx: AppContext, tmp_path: Path) -> FastAPI:
     # A deliberately absent bundle: the API must work with the frontend unbuilt.
     return create_app(ctx, frontend_dist=tmp_path / "not-built")
 
 
 @pytest.fixture
-def client(ctx, app):
+def client(ctx: AppContext, app: FastAPI) -> Generator[TestClient, None, None]:
     with TestClient(app, base_url=f"http://{ctx.settings.host}:{ctx.settings.port}") as c:
         yield c
 
 
 @pytest.fixture
-def ids(ctx, session, connection, clip) -> dict:
+def ids(ctx: AppContext, session: Session, connection: PlatformConnection, clip: Path) -> dict[str, Any]:
     channel = session.query(ChannelIdentity).one()
     media = make_media(session, clip)
     return {
@@ -47,13 +53,13 @@ def ids(ctx, session, connection, clip) -> dict:
 
 
 @pytest.fixture
-def auth(ctx, client) -> dict:
+def auth(ctx: AppContext, client: TestClient) -> dict[str, str]:
     response = client.post("/api/session")
     assert response.status_code == 200
     return {CSRF_HEADER: response.json()["csrf_token"]}
 
 
-def job_payload(ids: dict, **overrides) -> dict:
+def job_payload(ids: dict[str, Any], **overrides: Any) -> dict[str, Any]:
     payload = {
         "media_id": ids["media_id"],
         "title": "A test Short",
@@ -558,17 +564,18 @@ def test_duplicate_makes_an_independent_draft(client, auth, ids) -> None:
 # ======================================================================#
 
 
-def _ambiguous(ctx, session, new_job) -> int:
+def _ambiguous(ctx: AppContext, session: Session, new_job: Any) -> int:
     from hexton.worker.runner import JobRunner
 
     job = new_job()
-    ctx.connector.state.drop_upload_response = True
+    cast(Any, ctx.connector).state.drop_upload_response = True
     JobRunner(ctx, owner="w").run_once(now=BASE)
     with ctx.sessions() as s:
         row = s.get(ScheduledJob, job.id)
+        assert row is not None
         assert row.state == "JOB-NEEDS_REVIEW"
         assert row.insert_may_have_succeeded
-    return job.id
+    return int(job.id)
 
 
 def test_reconcile_refuses_an_id_that_was_never_surfaced(
@@ -846,7 +853,7 @@ def test_connections_are_listed_without_any_token(client, auth, connection) -> N
 
 
 @pytest.fixture
-def spa_client(ctx, tmp_path):
+def spa_client(ctx: AppContext, tmp_path: Path) -> Generator[TestClient, None, None]:
     """A client over a real bundle, so the SPA fallback route is actually mounted."""
     dist = tmp_path / "dist"
     (dist / "assets").mkdir(parents=True)
@@ -976,6 +983,20 @@ def test_media_check_still_reports_a_real_clip_completely(client, auth, clip) ->
     assert body["sha256"] and len(body["sha256"]) == 64
     assert body["size_bytes"] > 0
     assert body["container"] is not None
+
+
+def test_media_pick_endpoint_returns_chosen_path(client, auth, clip, monkeypatch) -> None:
+    monkeypatch.setenv("HEXTON_TEST_PICKER_PATH", str(clip))
+    res = client.post("/api/media/pick", json={"initial_dir": str(clip.parent)}, headers=auth)
+    assert res.status_code == 200
+    assert res.json() == {"path": str(clip.resolve())}
+
+
+def test_media_pick_endpoint_handles_cancellation(client, auth, monkeypatch) -> None:
+    monkeypatch.setenv("HEXTON_TEST_PICKER_PATH", "")
+    res = client.post("/api/media/pick", json={}, headers=auth)
+    assert res.status_code == 200
+    assert res.json() == {"path": None}
 
 
 def test_a_published_job_still_reads_after_its_observations_are_pruned(

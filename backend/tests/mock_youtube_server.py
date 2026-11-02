@@ -26,6 +26,7 @@ class MockYouTubeHandler(BaseHTTPRequestHandler):
     mock_videos: ClassVar[dict[str, dict[str, Any]]] = {}
     fail_next_upload: ClassVar[int | None] = None
     next_upload_quota_error: ClassVar[bool] = False
+    next_upload_rate_limit_error: ClassVar[bool] = False
     fail_next_chunk: ClassVar[int | None] = None
     fail_next_chunk_retry_after: ClassVar[int | None] = None
     fail_after_bytes: ClassVar[int | None] = None
@@ -76,6 +77,8 @@ class MockYouTubeHandler(BaseHTTPRequestHandler):
                 self.__class__.fail_next_upload = None
                 if code == 403 and self.__class__.next_upload_quota_error:
                     self._send_json(403, {"error": {"message": "quotaExceeded", "code": 403}})
+                elif code == 403 and self.__class__.next_upload_rate_limit_error:
+                    self._send_json(403, {"error": {"message": "userRateLimitExceeded", "code": 403}})
                 else:
                     self._send_json(code, {"error": "Simulated error"})
                 return

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from sqlalchemy import Connection, Engine, and_, or_, select, update
 
@@ -39,11 +40,11 @@ class Lease:
     expires_at: datetime
 
 
-def _due_filter(now: datetime):
+def _due_filter(now: datetime) -> Any:
     return or_(ScheduledJob.next_attempt_at.is_(None), ScheduledJob.next_attempt_at <= now)
 
 
-def _unleased(now: datetime):
+def _unleased(now: datetime) -> Any:
     return or_(
         ScheduledJob.lease_owner.is_(None),
         ScheduledJob.lease_expires_at.is_(None),

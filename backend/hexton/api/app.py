@@ -24,6 +24,8 @@ from fastapi.staticfiles import StaticFiles
 
 from hexton import __version__
 from hexton.api.routers import (
+    analytics,
+    channels,
     compliance,
     connections,
     dashboard,
@@ -52,8 +54,9 @@ log = logging.getLogger(__name__)
 def _default_frontend_dist() -> Path:
     # When packaged with PyInstaller, assets are unpacked into sys._MEIPASS or beside the exe
     if getattr(sys, "frozen", False):
-        if hasattr(sys, "_MEIPASS"):
-            meipass_dist = Path(sys._MEIPASS) / "frontend" / "dist"
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            meipass_dist = Path(str(meipass)) / "frontend" / "dist"
             if meipass_dist.exists():
                 return meipass_dist
         exe_dist = Path(sys.executable).parent / "frontend" / "dist"
@@ -122,6 +125,8 @@ def create_app(ctx: AppContext, *, frontend_dist: Path | None = None) -> FastAPI
     app.include_router(reporting.router)
     app.include_router(compliance.router)
     app.include_router(mentions.router)
+    app.include_router(analytics.router)
+    app.include_router(channels.router)
 
     _mount_frontend(app, frontend_dist or FRONTEND_DIST)
     return app

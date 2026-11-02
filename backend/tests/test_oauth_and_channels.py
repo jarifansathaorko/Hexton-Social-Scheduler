@@ -362,3 +362,66 @@ def test_arbitrary_channel_injection_rejected(
     )
     assert val2.status_code == 200
     assert any(i["code"] == "channel_mismatch" for i in val2.json()["issues"])
+
+
+def test_unsuccessful_oauth_connection_does_not_accumulate(
+    client: TestClient, auth_headers: dict[str, str], oauth_ctx: AppContext
+):
+    # 1. Initiating a connection
+    c1 = client.post(
+        "/api/connections",
+        json={"provider": "youtube", "label": "YouTube Channel"},
+        headers=auth_headers,
+    ).json()
+    conn1_id = c1["id"]
+
+    auth_resp = client.post(f"/api/connections/{conn1_id}/authorize", headers=auth_headers)
+    state1 = auth_resp.json()["state"]
+
+    # When mock server returns NO channels for this account:
+    MockYouTubeHandler.mock_channels = []
+
+    # Completing OAuth callback with an account that has 0 channels
+    res = client.get(
+        f"/oauth/callback?code=valid_code&state={state1}",
+        headers={"Accept": "text/html"},
+    )
+    assert res.status_code == 200
+    assert "No YouTube Channel Found" in res.text
+
+    # The empty connection MUST be purged from DB
+    with oauth_ctx.sessions() as s:
+        conn = s.get(PlatformConnection, conn1_id)
+        assert conn is None
+
+    # Listing connections should NOT show any empty ghost connection
+    listed = client.get("/api/connections", headers=auth_headers).json()
+    assert not any(c["id"] == conn1_id for c in listed)
+
+    # 2. Re-trying connection creation reuses or creates cleanly without accumulating
+    c2 = client.post(
+        "/api/connections",
+        json={"provider": "youtube", "label": "YouTube Channel"},
+        headers=auth_headers,
+    ).json()
+    conn2_id = c2["id"]
+
+    auth_resp2 = client.post(f"/api/connections/{conn2_id}/authorize", headers=auth_headers)
+    state2 = auth_resp2.json()["state"]
+
+    # User cancels OAuth on Google
+    cancel_res = client.get(
+        f"/oauth/callback?error=access_denied&state={state2}",
+        headers={"Accept": "text/html"},
+    )
+    assert cancel_res.status_code == 200
+    assert "Authorization Cancelled" in cancel_res.text
+
+    # The cancelled connection MUST also be cleaned up
+    with oauth_ctx.sessions() as s:
+        conn = s.get(PlatformConnection, conn2_id)
+        assert conn is None
+
+    # Connections list must still be clean
+    listed_after = client.get("/api/connections", headers=auth_headers).json()
+    assert not any(c["id"] in (conn1_id, conn2_id) for c in listed_after)

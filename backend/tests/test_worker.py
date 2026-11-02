@@ -273,6 +273,26 @@ def test_a_channel_from_another_connection_is_refused(ctx, session, new_job) -> 
     assert ctx.connector.call_count("start_resumable_upload") == 0
 
 
+def test_live_channel_mismatch_refuses_upload_when_token_belongs_to_different_channel(
+    ctx, session, new_job
+) -> None:
+    """When reaches_platform is True and active token owns a different channel ID, upload is strictly refused."""
+    from hexton.connectors.base import ChannelSummary
+
+    ctx.connector.reaches_platform = True
+    ctx.connector.state.channels = [
+        ChannelSummary(channel_id="UC-different", title="Different Channel")
+    ]
+    job = new_job()
+    runner_for(ctx).run_once(now=BASE)
+
+    row = reload(ctx, job.id)
+    assert row.state == JobState.BLOCKED.value
+    assert "Target channel mismatch" in (row.failure_message or "")
+    assert "strictly refuses to upload to the wrong YouTube channel" in (row.failure_message or "")
+    assert ctx.connector.call_count("start_resumable_upload") == 0
+
+
 # ======================================================================#
 # Interrupted upload, worker restart, ambiguous response
 # ======================================================================#

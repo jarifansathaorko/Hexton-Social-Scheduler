@@ -12,9 +12,11 @@ from __future__ import annotations
 import itertools
 import struct
 import uuid
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from hexton.bootstrap import AppContext, build_context
@@ -119,7 +121,9 @@ def sheets_state() -> SheetState:
 
 
 @pytest.fixture
-def ctx(settings: Settings, fake_state: FakeState, sheets_state: SheetState) -> AppContext:
+def ctx(
+    settings: Settings, fake_state: FakeState, sheets_state: SheetState
+) -> Generator[AppContext, None, None]:
     context = build_context(
         settings,
         fake_state=fake_state,
@@ -133,13 +137,13 @@ def ctx(settings: Settings, fake_state: FakeState, sheets_state: SheetState) -> 
 
 
 @pytest.fixture
-def session(ctx: AppContext):
+def session(ctx: AppContext) -> Generator[Session, None, None]:
     with ctx.sessions() as s:
         yield s
 
 
 @contextmanager
-def fresh(ctx: AppContext):
+def fresh(ctx: AppContext) -> Generator[Session, None, None]:
     """A brand-new session.
 
     The fixture session caches identity-map state, so a test that lets the worker write
@@ -179,6 +183,7 @@ def reload(ctx: AppContext, job_id: int) -> ScheduledJob:
     """
     with ctx.sessions() as s:
         job = s.get(ScheduledJob, job_id)
+        assert job is not None
         for rel in (
             "schedule",
             "content",
@@ -281,7 +286,12 @@ def make_job(
 
 
 @pytest.fixture
-def new_job(ctx, session, connection, clip):
+def new_job(
+    ctx: AppContext,
+    session: Session,
+    connection: PlatformConnection,
+    clip: Path,
+) -> Callable[..., ScheduledJob]:
     """Factory for a queued job over the standard clip and connection."""
     counter = itertools.count(1)
 
@@ -291,7 +301,7 @@ def new_job(ctx, session, connection, clip):
         publish_at: datetime | None = None,
         state: str = "JOB-QUEUED",
         media: MediaFile | None = None,
-        **kwargs,
+        **kwargs: Any,
     ) -> ScheduledJob:
         n = next(counter)
         return make_job(

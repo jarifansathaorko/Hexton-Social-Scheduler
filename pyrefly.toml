@@ -1,0 +1,22 @@
+python-version = "3.12"
+python-interpreter-path = "backend/.venv/Scripts/python.exe"
+search-path = [
+    "backend",
+    "backend/tests",
+    "backend/.venv/Lib/site-packages"
+]
+project-includes = [
+    "backend/hexton/**"
+]
+project-excludes = [
+    "backend/tests/**",
+    "backend/.venv/**"
+]
+
+[errors]
+implicit-any-parameter = false
+unannotated-parameter = false
+no-any-return-implicit = false
+unannotated-return = false
+implicit-any-type-argument = false
+missing-import = false

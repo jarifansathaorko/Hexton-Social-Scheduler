@@ -264,6 +264,10 @@ export interface Media {
   verified_at: string | null;
 }
 
+export interface MediaPickResult {
+  path: string | null;
+}
+
 export interface Channel {
   id: number;
   channel_id: string;
@@ -354,6 +358,10 @@ export interface Job {
   created_at: string;
   updated_at: string;
   cancelled_at: string | null;
+  view_count?: number;
+  like_count?: number;
+  comment_count?: number;
+  last_stats_synced_at?: string | null;
 }
 
 export interface JobEvent {
@@ -500,6 +508,15 @@ export interface CancelResult {
   job: Job;
 }
 
+export interface ChannelSearchResult {
+  channel_id: string;
+  title: string;
+  handle: string;
+  thumbnail_url: string;
+  subscriber_count: string;
+  verified: boolean;
+}
+
 export interface AuthorizeResult {
   authorization_url: string;
   state: string;
@@ -509,3 +526,75 @@ export interface AuthorizeResult {
   enabled: boolean;
   blocked_reason: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// Multi-Channel Analytics & 1K+ View Deliverables (Phase 1 & 2)
+// ---------------------------------------------------------------------------
+
+export interface ChannelAnalyticsSummary {
+  channel_id: string;
+  channel_title: string;
+  channel_handle?: string;
+  handle: string | null;
+  video_count: number;
+  qualified_count: number;
+  total_views: number;
+}
+
+export interface AnalyticsOverview {
+  total_videos: number;
+  total_views: number;
+  qualified_videos: number;
+  approaching_videos: number;
+  qualification_rate: number;
+  threshold: number;
+  channel_summaries: ChannelAnalyticsSummary[];
+}
+
+export interface CountryDemographic {
+  country_code: string;
+  country_name: string;
+  flag: string;
+  percentage: number;
+  views: number;
+}
+
+export interface AnalyticsVideoItem {
+  id: number;
+  schedule_id: string;
+  title: string;
+  video_id: string;
+  channel_id: string;
+  channel_title: string;
+  channel_handle?: string;
+  view_count: number;
+  like_count: number;
+  comment_count: number;
+  is_qualified: boolean;
+  threshold: number;
+  progress_ratio: number;
+  last_stats_synced_at: string | null;
+  uploaded_at: string | null;
+  publish_at_utc: string | null;
+  published_at?: string | null;
+  watch_url: string;
+  creator_approval?: "approved" | "rejected" | null;
+  demographics?: CountryDemographic[];
+}
+
+export interface AnalyticsVideoList {
+  items: AnalyticsVideoItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  threshold: number;
+}
+
+export interface AnalyticsRefreshResult {
+  synced_count: number;
+  qualified_count: number;
+  total_views: number;
+  updated_at: string;
+  errors?: string[];
+}
+

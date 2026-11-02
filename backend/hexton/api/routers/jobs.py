@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query, Response
@@ -37,7 +38,7 @@ from hexton.db.models import (
     UploadSession,
 )
 from hexton.domain.jobstate import TRANSITIONS, JobState
-from hexton.domain.scheduling import ensure_utc
+from hexton.domain.scheduling import ensure_utc, find_optimal_slots
 from hexton.reconciliation.ladder import operator_decision, reconcile
 from hexton.services import jobs as svc
 
@@ -113,6 +114,45 @@ def list_jobs(
     )
 
 
+@router.get("/smart-slots")
+def get_smart_slots(
+    channel_id: str | None = None,
+    target_tz: str = "America/New_York",
+    days_ahead: int = 3,
+    min_gap_hours: float = 2.5,
+    session: Session = SessionDep,
+) -> list[dict[str, Any]]:
+    """Algorithmic schedule optimizer.
+
+    Evaluates audience peak viewer windows (EST/target) and checks channel collision clearance
+    to recommend the highest-impact publication slots.
+    """
+    now = datetime.now(UTC)
+    existing_slots: list[datetime] = []
+
+    # Query future planned/queued jobs
+    query = select(ScheduledJob.publish_at_utc).where(
+        ScheduledJob.publish_at_utc.isnot(None),
+        ScheduledJob.state.in_(["draft", "queued", "awaiting_approval", "leased", "uploading"]),
+        ScheduledJob.publish_at_utc >= now - timedelta(hours=12),
+    )
+    if channel_id:
+        query = query.where(ScheduledJob.target_channel_id == channel_id)
+
+    for row in session.execute(query).scalars().all():
+        if row:
+            existing_slots.append(row)
+
+    return find_optimal_slots(
+        existing_slots,
+        start_time=now,
+        days_ahead=days_ahead,
+        min_gap_hours=min_gap_hours,
+        target_tz=target_tz,
+        limit=5,
+    )
+
+
 @router.get("/{job_id}", response_model=JobDetailOut)
 def get_job(
     job_id: int,
@@ -182,7 +222,7 @@ def _is_awaiting_review(job: ScheduledJob) -> bool:
     rule. ``insert_may_have_succeeded`` is deliberately never cleared automatically
     (``DF-12``), so this stays true until an operator resolves it.
     """
-    return bool(job.insert_may_have_succeeded) or JobState(job.state) is JobState.NEEDS_REVIEW
+    return job.insert_may_have_succeeded or JobState(job.state) is JobState.NEEDS_REVIEW
 
 
 def _reconcilable_candidates(ctx: AppContext, session: Session, job: ScheduledJob) -> list[str]:
@@ -258,10 +298,26 @@ def update(
 
 
 @router.delete("/{job_id}", status_code=204)
-def delete(job_id: int, session: Session = SessionDep) -> Response:
+def delete(
+    job_id: int,
+    delete_remote: bool = Query(default=True),
+    force: bool = Query(default=False),
+    session: Session = SessionDep,
+    ctx: AppContext = CtxDep,
+) -> Response:
     job = _get(session, job_id)
     try:
-        svc.delete_draft(session, job)
+        if job.video_id is not None or force:
+            svc.delete_job(
+                ctx,
+                session,
+                job,
+                delete_remote=delete_remote,
+                force=force,
+                now=datetime.now(UTC),
+            )
+        else:
+            svc.delete_draft(session, job)
     except svc.JobOperationError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     session.commit()
@@ -337,7 +393,7 @@ def cancel(
     session: Session = SessionDep,
     ctx: AppContext = CtxDep,
     zone: ZoneInfo = ZoneDep,
-) -> dict:
+) -> dict[str, Any]:
     job = _get(session, job_id)
     try:
         outcome = svc.cancel_job(

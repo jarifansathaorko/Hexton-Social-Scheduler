@@ -335,6 +335,21 @@ def test_an_empty_quota_window_defers_instead_of_failing(ctx, new_job) -> None:
     assert any("deferred until the next quota" in msg for _k, msg in events_for(ctx, job_id))
 
 
+def test_a_remote_quota_error_during_get_video_defers_until_next_reset(ctx, new_job) -> None:
+    job_id, _ = uploaded(ctx, new_job)
+    make_due(ctx, job_id)
+    ctx.connector.state.fail_always["get_video"] = FailureKind.QUOTA
+
+    result = PublishConfirmationSweep(ctx).run(now=BASE)
+
+    assert result.quota_deferred == 1
+    row = reload(ctx, job_id)
+    assert row.state == JobState.SCHEDULED.value
+    assert row.next_poll_at is not None
+    assert row.next_poll_at > quota.next_reset(BASE)
+    assert any("deferred until next quota window" in msg for _k, msg in events_for(ctx, job_id))
+
+
 def test_a_job_without_a_video_id_is_never_polled(ctx, new_job) -> None:
     """Nothing to confirm means no confirmation is attempted, let alone recorded."""
     new_job(state="JOB-SCHEDULED", publish_at=PAST)

@@ -1,0 +1,17 @@
+{
+  "include": [
+    "backend/hexton"
+  ],
+  "extraPaths": [
+    "backend",
+    "backend/tests"
+  ],
+  "venvPath": "backend",
+  "venv": ".venv",
+  "pythonVersion": "3.12",
+  "pythonPlatform": "Windows",
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": false,
+  "reportUnknownMemberType": false,
+  "reportOptionalMemberAccess": false
+}

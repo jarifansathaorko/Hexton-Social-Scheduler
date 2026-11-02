@@ -77,6 +77,24 @@ def content_type_for(path: str) -> str:
     return ALLOWED_EXTENSIONS.get(Path(path).suffix.lower(), "application/octet-stream")
 
 
+def resolve_content_type(path: str | None = None, container: str | None = None) -> str:
+    """Return a standard MIME type (e.g. 'video/mp4') for a media path or container name."""
+    from pathlib import Path
+
+    if path:
+        suffix = Path(path).suffix.lower()
+        if suffix in ALLOWED_EXTENSIONS:
+            return ALLOWED_EXTENSIONS[suffix]
+    if container:
+        c = container.lower().strip().lstrip(".")
+        if "/" in c:
+            return c
+        for ext, mime in ALLOWED_EXTENSIONS.items():
+            if ext.lstrip(".") == c:
+                return mime
+    return "video/mp4"
+
+
 def check_extension(path: str) -> str | None:
     """Return a blocking reason when the extension is not an accepted clip format."""
     from pathlib import Path

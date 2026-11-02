@@ -1,96 +1,163 @@
 @import "tailwindcss";
 
-/*
- * The app decides whether it is light or dark, not the operating system: an operator
- * may want the light reference theme while their OS is dark, and the choice has to
- * survive a reload because a tool that flips appearance every morning is unusable.
- */
 @custom-variant dark (&:where(.dark, .dark *));
 
 /*
- * Design tokens.
- *
- * A small, deliberate set rather than an arbitrary palette: each token maps to a
- * *meaning* the product already defines in `05-visual-uiux-prd.md` — the state cue
- * colours (grey outline, blue progress, amber attention, red warning, green filled),
- * the purple accent the approved desktop references use for actions, and the three
- * type scales. Screens pick a semantic token; they do not pick a hex value, which is
- * what stops four slightly-different ambers appearing over time.
- *
- * Light is the default because the approved references are light first. `.dark`
- * re-declares the same variables rather than every component growing a `dark:`
- * sibling class, so one palette swap re-themes the whole application and a component
- * cannot accidentally be styled for only one of the two.
+ * HexScheduler Design System Tokens
+ * Reference Visual Direction: Dark, minimal black/charcoal foundation,
+ * restrained violet/lavender glow, compact professional data surfaces.
  */
-@theme {
-  /* Surfaces — light (default). */
-  --color-canvas: #f4f5f7;
-  --color-surface: #ffffff;
-  --color-surface-raised: #f9fafb;
-  --color-edge: #e4e7ec;
-  --color-edge-strong: #d0d5dd;
 
-  --color-ink: #101828;
-  --color-ink-muted: #475467;
-  --color-ink-faint: #667085;
+:root {
+  --hs-canvas: #070910;
+  --hs-shell: #090C15;
+  --hs-surface: #0D111C;
+  --hs-surface-raised: #121727;
+  --hs-surface-soft: #171B2C;
+  --hs-border: #252B40;
+  --hs-border-strong: #3A315D;
+  --hs-text: #F4F3FA;
+  --hs-text-secondary: #B5B8CC;
+  --hs-text-muted: #7E849D;
+  --hs-violet: #8B5CF6;
+  --hs-violet-bright: #A78BFA;
+  --hs-violet-soft: #21163D;
+  --hs-success: #34D399;
+  --hs-warning: #FBBF24;
+  --hs-danger: #FB7185;
+  --hs-info: #60A5FA;
 
-  /*
-   * State cues. These encode what a job is *doing*, so they carry the same meaning in
-   * both themes; only their lightness moves, so each keeps at least AA contrast on the
-   * surface it sits on.
-   */
-  --color-cue-neutral: #667085;
-  --color-cue-progress: #155eef;
-  --color-cue-attention: #b54708;
-  --color-cue-warning: #d92d20;
-  --color-cue-success: #067647;
+  --color-canvas: var(--hs-canvas);
+  --color-surface: var(--hs-surface);
+  --color-surface-raised: var(--hs-surface-raised);
+  --color-edge: var(--hs-border);
+  --color-edge-strong: var(--hs-border-strong);
 
-  /* Brand. Used for the primary action and the active nav item — never for state. */
-  --color-accent: #6938ef;
-  --color-accent-hover: #531fd6;
-  --color-on-accent: #ffffff;
+  --color-ink: var(--hs-text);
+  --color-ink-muted: var(--hs-text-secondary);
+  --color-ink-faint: var(--hs-text-muted);
 
-  /* Referenced by existing markup as `text-ok` / `text-link`. */
-  --color-ok: #067647;
-  --color-link: #6938ef;
+  --color-cue-neutral: #7E849D;
+  --color-cue-progress: var(--hs-info);
+  --color-cue-attention: var(--hs-warning);
+  --color-cue-warning: var(--hs-danger);
+  --color-cue-success: var(--hs-success);
 
-  --font-sans: "Segoe UI", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --font-mono: ui-monospace, "Cascadia Mono", "Segoe UI Mono", monospace;
+  --color-accent: var(--hs-violet);
+  --color-accent-hover: var(--hs-violet-bright);
+  --color-on-accent: #FFFFFF;
 
-  --radius-card: 10px;
+  --color-ok: var(--hs-success);
+  --color-link: var(--hs-violet-bright);
+
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Mono", "Segoe UI Mono", ui-monospace, monospace;
+
+  --radius-card: 14px;
+  --radius-control: 8px;
+
+  color-scheme: dark;
 }
 
 .dark {
-  --color-canvas: #0b0d10;
-  --color-surface: #14181d;
-  --color-surface-raised: #1b2027;
-  --color-edge: #262d36;
-  --color-edge-strong: #37414e;
+  --hs-canvas: #070910;
+  --hs-shell: #090C15;
+  --hs-surface: #0D111C;
+  --hs-surface-raised: #121727;
+  --hs-surface-soft: #171B2C;
+  --hs-border: #252B40;
+  --hs-border-strong: #3A315D;
+  --hs-text: #F4F3FA;
+  --hs-text-secondary: #B5B8CC;
+  --hs-text-muted: #7E849D;
+  --hs-violet: #8B5CF6;
+  --hs-violet-bright: #A78BFA;
+  --hs-violet-soft: #21163D;
+  --hs-success: #34D399;
+  --hs-warning: #FBBF24;
+  --hs-danger: #FB7185;
+  --hs-info: #60A5FA;
 
-  --color-ink: #e8edf3;
-  --color-ink-muted: #9aa7b6;
-  --color-ink-faint: #66727f;
-
-  --color-cue-neutral: #8b97a5;
-  --color-cue-progress: #4c9aff;
-  --color-cue-attention: #f2b01e;
-  --color-cue-warning: #ff5f56;
-  --color-cue-success: #3fb950;
-
-  --color-accent: #8b5cf6;
-  --color-accent-hover: #a78bfa;
-  --color-on-accent: #0b0d10;
-
-  --color-ok: #3fb950;
-  --color-link: #a78bfa;
+  color-scheme: dark;
 }
 
-:root {
+/* Optional light theme mode */
+.light:not(.dark) {
+  --hs-canvas: #F8F9FC;
+  --hs-shell: #FFFFFF;
+  --hs-surface: #FFFFFF;
+  --hs-surface-raised: #F1F3F9;
+  --hs-surface-soft: #E9ECF5;
+  --hs-border: #E2E6EF;
+  --hs-border-strong: #CBD2E0;
+  --hs-text: #0F172A;
+  --hs-text-secondary: #475569;
+  --hs-text-muted: #64748B;
+  --hs-violet: #7C3AED;
+  --hs-violet-bright: #6D28D9;
+  --hs-violet-soft: #EDE9FE;
+  --hs-success: #16A34A;
+  --hs-warning: #D97706;
+  --hs-danger: #E11D48;
+  --hs-info: #2563EB;
+
+  --color-canvas: var(--hs-canvas);
+  --color-surface: var(--hs-surface);
+  --color-surface-raised: var(--hs-surface-raised);
+  --color-edge: var(--hs-border);
+  --color-edge-strong: var(--hs-border-strong);
+
+  --color-ink: var(--hs-text);
+  --color-ink-muted: var(--hs-text-secondary);
+  --color-ink-faint: var(--hs-text-muted);
+
+  --color-cue-neutral: #64748B;
+  --color-cue-progress: var(--hs-info);
+  --color-cue-attention: var(--hs-warning);
+  --color-cue-warning: var(--hs-danger);
+  --color-cue-success: var(--hs-success);
+
+  --color-accent: var(--hs-violet);
+  --color-accent-hover: var(--hs-violet-bright);
+  --color-on-accent: #FFFFFF;
+
+  --color-ok: var(--hs-success);
+  --color-link: var(--hs-violet);
+
   color-scheme: light;
 }
 
-.dark {
-  color-scheme: dark;
+@theme {
+  --color-canvas: var(--hs-canvas);
+  --color-shell: var(--hs-shell);
+  --color-surface: var(--hs-surface);
+  --color-surface-raised: var(--hs-surface-raised);
+  --color-surface-soft: var(--hs-surface-soft);
+  --color-edge: var(--hs-border);
+  --color-edge-strong: var(--hs-border-strong);
+
+  --color-ink: var(--hs-text);
+  --color-ink-muted: var(--hs-text-secondary);
+  --color-ink-faint: var(--hs-text-muted);
+
+  --color-cue-neutral: #7E849D;
+  --color-cue-progress: var(--hs-info);
+  --color-cue-attention: var(--hs-warning);
+  --color-cue-warning: var(--hs-danger);
+  --color-cue-success: var(--hs-success);
+
+  --color-accent: var(--hs-violet);
+  --color-accent-hover: var(--hs-violet-bright);
+  --color-accent-soft: var(--hs-violet-soft);
+  --color-on-accent: #FFFFFF;
+
+  --color-ok: var(--hs-success);
+  --color-link: var(--hs-violet-bright);
+
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+  --font-mono: "Cascadia Mono", "Segoe UI Mono", ui-monospace, monospace;
+
+  --radius-card: 14px;
 }
 
 html,
@@ -101,19 +168,39 @@ body,
 
 body {
   margin: 0;
-  background: var(--color-canvas);
-  color: var(--color-ink);
+  background-color: var(--hs-canvas);
+  color: var(--hs-text);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
 
-/* Focus is visible everywhere, without a mouse-dependent outline colour. */
+/* Subtle violet radial glow at the top for desktop web view */
+.hs-glow-radial {
+  background: radial-gradient(ellipse at 68% 0%, rgb(139 92 246 / 12%), transparent 36%), var(--hs-canvas);
+}
+
+/* Custom fine scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--hs-border);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--hs-border-strong);
+}
+
+/* Accessible focus visible */
 :focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--hs-violet);
   outline-offset: 2px;
 }
 
-/* Respect an operator who asked their OS for less motion. */
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -126,26 +213,103 @@ body {
 
 @layer components {
   .card {
-    @apply rounded-[var(--radius-card)] border border-edge bg-surface;
+    background-color: var(--hs-surface);
+    border: 1px solid var(--hs-border);
+    border-radius: var(--radius-card);
   }
-  /*
-   * The hover state is a border, never a text-colour swap: swapping to white on a
-   * light surface would make the label disappear exactly when the operator points at
-   * it, and swapping text colour at all is a cue that reads as "this is a link".
-   */
+
+  .hs-card {
+    background-color: var(--hs-surface);
+    border: 1px solid var(--hs-border);
+    border-radius: var(--radius-card);
+  }
+
+  .hs-card-hover {
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  }
+  .hs-card-hover:hover {
+    border-color: var(--hs-border-strong);
+  }
+
   .btn {
-    @apply inline-flex items-center gap-2 rounded-md border border-edge-strong bg-surface-raised px-3 py-1.5 text-sm text-ink transition-colors hover:border-accent disabled:cursor-not-allowed disabled:opacity-40;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    border-radius: 0.5rem;
+    border: 1px solid var(--hs-border);
+    background-color: var(--hs-surface-raised);
+    padding: 0.45rem 0.85rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: var(--hs-text);
+    transition: all 0.15s ease;
+    cursor: pointer;
   }
+  .btn:hover:not(:disabled) {
+    border-color: var(--hs-border-strong);
+    background-color: var(--hs-surface-soft);
+  }
+  .btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.4;
+  }
+
   .btn-primary {
-    @apply border-transparent bg-accent text-on-accent hover:bg-accent-hover;
+    border-color: transparent;
+    background-color: var(--hs-violet);
+    color: #FFFFFF;
+    box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.3), 0 0 16px -2px rgb(139 92 246 / 0.4);
   }
+  .btn-primary:hover:not(:disabled) {
+    background-color: var(--hs-violet-bright);
+    border-color: transparent;
+  }
+
+  .btn-secondary {
+    border-color: var(--hs-border);
+    background-color: var(--hs-surface-raised);
+    color: var(--hs-text);
+  }
+  .btn-secondary:hover:not(:disabled) {
+    border-color: var(--hs-border-strong);
+    background-color: var(--hs-surface-soft);
+  }
+
   .btn-danger {
-    @apply border-cue-warning/50 text-cue-warning hover:border-cue-warning hover:bg-cue-warning/10;
+    border-color: rgb(251 113 133 / 0.4);
+    background-color: rgb(251 113 133 / 0.08);
+    color: var(--hs-danger);
   }
+  .btn-danger:hover:not(:disabled) {
+    border-color: var(--hs-danger);
+    background-color: rgb(251 113 133 / 0.18);
+  }
+
   .input {
-    @apply w-full rounded-md border border-edge bg-surface px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none;
+    width: 100%;
+    border-radius: 0.5rem;
+    border: 1px solid var(--hs-border);
+    background-color: var(--hs-surface-raised);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.875rem;
+    color: var(--hs-text);
+    transition: border-color 0.15s ease, box-shadow 0.15s ease;
   }
+  .input::placeholder {
+    color: var(--hs-text-muted);
+  }
+  .input:focus {
+    border-color: var(--hs-violet);
+    outline: none;
+    box-shadow: 0 0 0 1px var(--hs-violet);
+  }
+
   .label {
-    @apply mb-1 block text-xs font-medium uppercase tracking-wide text-ink-muted;
+    margin-bottom: 0.35rem;
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 500;
+    letter-spacing: 0.025em;
+    color: var(--hs-text-secondary);
   }
 }

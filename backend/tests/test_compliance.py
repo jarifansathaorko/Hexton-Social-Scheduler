@@ -430,6 +430,13 @@ def test_a_healthy_connection_is_just_ok() -> None:
     assert result.remedy
 
 
+def test_a_quota_exhausted_connection_is_diagnosed_correctly() -> None:
+    result = diagnose(connected=True, policy_accepted=True, quota_exhausted=True)
+    assert result.code is DiagnosticCode.QUOTA_EXHAUSTED
+    assert "quota" in result.remedy.lower()
+    assert result.retry_worthwhile is True
+
+
 # ==========================================================================
 # D-1 - retention: a deadline is a record, and the sweep honours it
 # ==========================================================================

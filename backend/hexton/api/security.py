@@ -43,7 +43,7 @@ import hashlib
 import hmac
 import secrets
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from starlette.datastructures import Headers
@@ -145,7 +145,9 @@ class LocalSecurityMiddleware(BaseHTTPMiddleware):
         self.allowed_hosts = allowed_hosts
         self.cookie_name = cookie_name
 
-    async def dispatch(self, request: Request, call_next: Callable) -> Response:
+    async def dispatch(
+        self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
         host = (request.headers.get("host") or "").lower()
         if host and host not in self.allowed_hosts:
             return _deny(

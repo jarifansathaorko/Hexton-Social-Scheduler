@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from hexton import quota as quota_mod
 from hexton.api.schemas import IssueOut, JobFields
@@ -200,7 +200,11 @@ def prepare(ctx: AppContext, session: Session, data: JobFields, *, now: datetime
             data.publish_at_utc,
             now=now,
             never_published=True,
-            min_lead_minutes=data.min_lead_minutes or ctx.settings.min_lead_minutes,
+            min_lead_minutes=(
+                data.min_lead_minutes
+                if data.min_lead_minutes is not None
+                else ctx.settings.min_lead_minutes
+            ),
             warning_lead_minutes=ctx.settings.warning_lead_minutes,
         )
         schedule_issues += [
@@ -270,7 +274,11 @@ def create_job(
     schedule = Schedule(
         publish_at_utc=data.publish_at_utc,
         display_timezone=data.display_timezone or ctx.settings.display_timezone,
-        min_lead_minutes=data.min_lead_minutes or ctx.settings.min_lead_minutes,
+        min_lead_minutes=(
+            data.min_lead_minutes
+            if data.min_lead_minutes is not None
+            else ctx.settings.min_lead_minutes
+        ),
         report_date=(data.publish_at_utc or now),
     )
     job = ScheduledJob(
@@ -363,7 +371,11 @@ def update_job(
     job.content.consent_transforms = data.consent_transforms
     job.schedule.publish_at_utc = data.publish_at_utc
     job.schedule.display_timezone = data.display_timezone or job.schedule.display_timezone
-    job.schedule.min_lead_minutes = data.min_lead_minutes or job.schedule.min_lead_minutes
+    job.schedule.min_lead_minutes = (
+        data.min_lead_minutes
+        if data.min_lead_minutes is not None
+        else job.schedule.min_lead_minutes
+    )
     job.schedule.report_date = data.publish_at_utc or job.schedule.report_date
     ev.record_event(
         session,
@@ -414,6 +426,63 @@ def duplicate_job(
         payload={"source_job_id": job.id},
     )
     return clone
+
+
+def delete_job(
+    ctx: AppContext,
+    session: Session,
+    job: ScheduledJob,
+    *,
+    delete_remote: bool = True,
+    force: bool = False,
+    now: datetime,
+) -> None:
+    """Delete a job, deleting any uploaded video from YouTube if requested and permitted."""
+    state = JobState(job.state)
+    if (
+        state is JobState.UPLOADING
+        and job.lease_owner
+        and (job.lease_expires_at is None or job.lease_expires_at > now)
+    ):
+        raise JobOperationError(
+            "This job is currently uploading. Please wait for the upload to finish or fail before deleting.",
+            code="upload_in_progress",
+        )
+
+    # If the job has an associated remote video, attempt remote deletion
+    if job.video_id is not None and delete_remote:
+        conn = job.connection
+        token = get_valid_token(ctx, session, conn, now) if conn and conn.status == "active" else None
+        if token:
+            try:
+                try:
+                    ctx.connector.delete_video(token, job.video_id)
+                except ConnectorError as err:
+                    if err.kind == FailureKind.AUTHORIZATION and conn:
+                        fresh_tok = get_valid_token(ctx, session, conn, now, force_refresh=True)
+                        if fresh_tok and fresh_tok != token:
+                            ctx.connector.delete_video(fresh_tok, job.video_id)
+                        else:
+                            raise
+                    else:
+                        raise
+            except ConnectorError as exc:
+                if not force:
+                    err_msg = str(exc)
+                    if "insufficient" in err_msg.lower() or "403" in err_msg:
+                        raise JobOperationError(
+                            f"YouTube permission denied (403): Your YouTube channel connection lacks video deletion scope. "
+                            f"To delete videos from YouTube, reconnect the channel in 'YouTube Channels' or pass force=True. "
+                            f"(Video ID: {job.video_id})",
+                            code="remote_permission_denied",
+                        ) from exc
+                    raise JobOperationError(
+                        f"Failed to delete video {job.video_id} from YouTube: {exc}",
+                        code="remote_delete_failed",
+                    ) from exc
+                log.warning("Force deleting job %s despite remote deletion error: %s", job.id, exc)
+
+    session.delete(job)
 
 
 def delete_draft(session: Session, job: ScheduledJob) -> None:
@@ -779,6 +848,48 @@ def _push_status(
     )
 
 
+def get_valid_token(
+    ctx: AppContext,
+    session: Session,
+    connection: PlatformConnection,
+    now: datetime,
+    *,
+    force_refresh: bool = False,
+) -> str | None:
+    """Return a fresh, valid access token for connection, refreshing when expired or forced."""
+    key = f"conn:{connection.public_id}"
+    access = ctx.credentials.read(f"{key}:access")
+    refresh = ctx.credentials.read(f"{key}:refresh")
+
+    is_fresh = (
+        not force_refresh
+        and bool(access)
+        and connection.token_expires_at is not None
+        and connection.token_expires_at > now + timedelta(seconds=60)
+    )
+    if is_fresh:
+        return access
+
+    if not refresh:
+        return access if (not force_refresh and access) else None
+
+    try:
+        tokens = ctx.connector.refresh(refresh)
+    except ConnectorError as exc:
+        log.warning("Failed to refresh token for connection %s: %s", connection.id, exc)
+        return access if (not force_refresh and access) else None
+
+    ctx.credentials.write(f"{key}:access", tokens.access_token)
+    if tokens.refresh_token and tokens.refresh_token != refresh:
+        ctx.credentials.write(f"{key}:refresh", tokens.refresh_token)
+    if tokens.expires_in:
+        connection.token_expires_at = now + timedelta(seconds=tokens.expires_in)
+    connection.last_token_check_at = now
+    connection.last_token_check_ok = True
+    session.flush()
+    return tokens.access_token
+
+
 def _token(ctx: AppContext, connection: PlatformConnection) -> str | None:
     key = f"conn:{connection.public_id}"
     access = ctx.credentials.read(f"{key}:access")
@@ -835,12 +946,6 @@ def cancel_job(
         and job.lease_owner
         and (job.lease_expires_at is None or job.lease_expires_at > now)
     ):
-        # ``UPLOADING -> CANCELLED`` is not in the transition table, and writing the
-        # column directly would only pretend. A worker is inside the transfer right
-        # now: it will commit its own result a moment later and overwrite whatever we
-        # set here, leaving an operator with a row that says "cancelled" and a video
-        # that exists. Wait for the transfer to end — or for its lease to lapse — and
-        # then decide, which is exactly what the state machine already requires.
         raise JobOperationError(
             "This job is uploading right now, so cancelling it would be overwritten by "
             "the worker a moment later. Wait for the transfer to finish (or for its "
@@ -864,11 +969,6 @@ def cancel_job(
 
     if job.video_id is None:
         if job.insert_may_have_succeeded:
-            # The bytes may be on their way right now, or may already have landed. The
-            # absence of a video *ID* is not the absence of a video, and saying so is
-            # the one sentence an operator would repeat to a client: "nothing was ever
-            # uploaded". The honest answer is that the outcome is unknown and remains
-            # so — which is also why ``insert_may_have_succeeded`` is not cleared here.
             job.cancel_remote_outcome = "remote_unknown"
             session.flush()
             return CancelOutcome(
@@ -891,7 +991,7 @@ def cancel_job(
         )
 
     conn = job.connection
-    token = _token(ctx, conn) if conn and conn.status == "active" else None
+    token = get_valid_token(ctx, session, conn, now) if conn and conn.status == "active" else None
     if token is None:
         job.cancel_remote_outcome = "remote_unknown"
         session.flush()
@@ -906,7 +1006,18 @@ def cancel_job(
     assert conn is not None
     try:
         if delete_remote:
-            removed = ctx.connector.delete_video(token, job.video_id)
+            try:
+                removed = ctx.connector.delete_video(token, job.video_id)
+            except ConnectorError as err:
+                if err.kind == FailureKind.AUTHORIZATION and conn:
+                    fresh_tok = get_valid_token(ctx, session, conn, now, force_refresh=True)
+                    if fresh_tok and fresh_tok != token:
+                        removed = ctx.connector.delete_video(fresh_tok, job.video_id)
+                    else:
+                        raise
+                else:
+                    raise
+
             quota_mod.add_units_on(session, conn.provider, quota_mod.COST_UPDATE, now)
             job.cancel_remote_outcome = "deleted" if removed else "not_found"
             ev.record_event(
@@ -915,7 +1026,7 @@ def cancel_job(
                 kind=ev.KIND_CANCELLED_REMOTE,
                 message=f"Video {job.video_id} was deleted from YouTube."
                 if removed
-                else f"YouTube did not have video {job.video_id}.",
+                else f"YouTube reported that video {job.video_id} does not exist (already removed).",
             )
             return CancelOutcome(
                 local_cancelled=True,
@@ -924,8 +1035,7 @@ def cancel_job(
                 message=(
                     f"Cancelled locally, and video {job.video_id} was deleted from YouTube."
                     if removed
-                    else f"Cancelled locally. YouTube reported that video "
-                    f"{job.video_id} does not exist."
+                    else f"Cancelled locally. Video {job.video_id} does not exist on YouTube."
                 ),
             )
 
@@ -951,18 +1061,40 @@ def cancel_job(
                 f'"delete the video" instead.',
             )
 
-        status = ctx.connector.update_video_status(
-            token,
-            job.video_id,
-            privacy="private",
-            publish_at=None,
-            full_snippet={
-                "title": job.content.title,
-                "description": job.content.description,
-                "tags": list(job.content.tags) + list(job.content.hashtags),
-                "categoryId": job.content.category_id,
-            },
-        )
+        try:
+            status = ctx.connector.update_video_status(
+                token,
+                job.video_id,
+                privacy="private",
+                publish_at=None,
+                full_snippet={
+                    "title": job.content.title,
+                    "description": job.content.description,
+                    "tags": list(job.content.tags) + list(job.content.hashtags),
+                    "categoryId": job.content.category_id,
+                },
+            )
+        except ConnectorError as err:
+            if err.kind == FailureKind.AUTHORIZATION and conn:
+                fresh_tok = get_valid_token(ctx, session, conn, now, force_refresh=True)
+                if fresh_tok and fresh_tok != token:
+                    status = ctx.connector.update_video_status(
+                        fresh_tok,
+                        job.video_id,
+                        privacy="private",
+                        publish_at=None,
+                        full_snippet={
+                            "title": job.content.title,
+                            "description": job.content.description,
+                            "tags": list(job.content.tags) + list(job.content.hashtags),
+                            "categoryId": job.content.category_id,
+                        },
+                    )
+                else:
+                    raise
+            else:
+                raise
+
         quota_mod.add_units_on(session, conn.provider, quota_mod.COST_UPDATE, now)
         job.cancel_remote_outcome = f"set_{status.privacy_status}"
         ev.record_event(
@@ -982,23 +1114,33 @@ def cancel_job(
         )
     except ConnectorError as exc:
         job.cancel_remote_outcome = "remote_failed"
+        err_msg = str(exc)
+        if "insufficient" in err_msg.lower() or "403" in err_msg:
+            user_msg = (
+                f"YouTube permission denied (403): Your YouTube channel connection lacks video deletion/management scope. "
+                f"To delete/cancel videos on YouTube, please go to 'YouTube Channels' in the sidebar and click "
+                f"'Reconnect' on {conn.label} to authorize full deletion permissions. (Video ID: {job.video_id})"
+            )
+        else:
+            user_msg = (
+                f"YouTube did not accept the cancellation ({exc}). The local job is "
+                f"cancelled, but video {job.video_id} may still publish at its original "
+                f"time; check it by hand."
+            )
+
         ev.record_event(
             session,
             job_id=job.id,
             kind=ev.KIND_CANCEL_REMOTE_FAILED,
-            message=f"YouTube did not accept the cancellation ({exc}). The local job is "
-            f"cancelled, but video {job.video_id} may still publish at its original "
-            f"time; check it by hand.",
-            payload={"video_id": job.video_id},
+            message=user_msg,
+            payload={"video_id": job.video_id, "error": err_msg},
         )
         session.flush()
         return CancelOutcome(
             local_cancelled=True,
             remote_attempted=True,
             remote_succeeded=False,
-            message=f"Cancelled locally, but YouTube did not accept the change ({exc}). "
-            f"Video {job.video_id} may still publish at its original time — please "
-            f"check it in Studio.",
+            message=user_msg,
         )
 
 

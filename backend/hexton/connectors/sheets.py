@@ -36,6 +36,16 @@ SHEETS_SCOPES: tuple[str, ...] = ("https://www.googleapis.com/auth/spreadsheets"
 #: Column order is frozen for the life of ``SCHEMA_VERSION`` because of this.
 KEY_COLUMN = "Sync Key"
 
+#: The clean, simplified creator-first columns:
+CREATOR_COLUMNS: tuple[str, ...] = (
+    "SL",
+    "Time",
+    "Channel",
+    "Video URL",
+    "Upload Status",
+    "Upload Time",
+)
+
 #: ``REQUIRED_COLUMNS`` may never be removed or reordered; ``OPTIONAL_COLUMNS`` may be
 #: omitted from the destination but are always written when present.
 REQUIRED_COLUMNS: tuple[str, ...] = (
@@ -45,6 +55,7 @@ REQUIRED_COLUMNS: tuple[str, ...] = (
     "Report Schema Version",
 )
 OPTIONAL_COLUMNS: tuple[str, ...] = (
+    *CREATOR_COLUMNS,
     "YouTube Video ID",
     "Canonical Video URL",
     "Video Title",
@@ -61,8 +72,10 @@ OPTIONAL_COLUMNS: tuple[str, ...] = (
     "Generated At (UTC)",
 )
 
-#: The complete, frozen column order for ``v1``. Index 0 is the key column.
-SHEET_COLUMNS: tuple[str, ...] = REQUIRED_COLUMNS + OPTIONAL_COLUMNS
+#: The complete column order. Creator columns are placed first for human ease.
+SHEET_COLUMNS: tuple[str, ...] = CREATOR_COLUMNS + REQUIRED_COLUMNS + tuple(
+    c for c in OPTIONAL_COLUMNS if c not in CREATOR_COLUMNS
+)
 
 ErrorKind = Literal[
     "expired",  # the grant can no longer authorize a request
@@ -127,17 +140,21 @@ class SheetConnector(Protocol):
 
     def verify(self, destination: SheetDestination) -> None:
         """Prove the destination exists and is reachable. Raises ``SheetError``."""
+        ...
 
     def read_sync_keys(self, destination: SheetDestination) -> tuple[str, ...]:
         """Return every non-empty value in the key column, in sheet order."""
+        ...
 
     def append_rows(
         self, destination: SheetDestination, rows: Sequence[Mapping[str, str]]
     ) -> SheetWrite:
         """Append ``rows`` to the destination. Raises ``SheetError`` on failure."""
+        ...
 
     def test_write(self, destination: SheetDestination, key: str) -> SheetWrite:
         """Write exactly one probe row under ``key``, then read it back."""
+        ...
 
 
 class SheetsUnconfigured(Exception):
@@ -145,6 +162,7 @@ class SheetsUnconfigured(Exception):
 
 
 __all__ = [
+    "CREATOR_COLUMNS",
     "KEY_COLUMN",
     "OPTIONAL_COLUMNS",
     "REQUIRED_COLUMNS",

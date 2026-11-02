@@ -18,6 +18,7 @@ import sys
 import threading
 from contextlib import suppress
 from pathlib import Path
+from typing import cast
 
 from hexton import __version__
 from hexton.bootstrap import AppContext, build_context
@@ -25,7 +26,7 @@ from hexton.config import Settings, get_settings
 from hexton.connectors.registry import BuildProfile
 
 BACKEND_ROOT = (
-    Path(sys._MEIPASS)
+    Path(str(getattr(sys, "_MEIPASS", "")))
     if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS")
     else Path(__file__).resolve().parents[1]
 )
@@ -148,7 +149,7 @@ def cmd_worker(args: argparse.Namespace) -> int:
 # ----------------------------------------------------------------------
 
 
-def _spawn_worker(ctx: AppContext) -> subprocess.Popen | None:
+def _spawn_worker(ctx: AppContext) -> subprocess.Popen[bytes] | None:
     """Start the worker as a child process.
 
     ``--no-start-worker`` exists so a worker can be run in its own terminal during
@@ -206,7 +207,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
 
     app = create_app(ctx)
 
-    child: subprocess.Popen | None = None
+    child: subprocess.Popen[bytes] | None = None
     if not args.no_start_worker:
         child = _spawn_worker(ctx)
         if child is not None:
@@ -356,7 +357,7 @@ def main(argv: list[str] | None = None) -> int:
     info.set_defaults(func=cmd_info)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    return cast(int, args.func(args))
 
 
 if __name__ == "__main__":  # pragma: no cover

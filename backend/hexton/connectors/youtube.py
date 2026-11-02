@@ -14,6 +14,7 @@ Implements YouTube Data API v3 and resumable uploads over httpx.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,25 @@ def _parse_iso(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
+def _ensure_video_mime_type(content_type: str) -> str:
+    """Guarantee a standard video MIME type (e.g. video/mp4) rather than raw container names."""
+    ct = (content_type or "").strip()
+    if "/" in ct:
+        return ct
+    c = ct.lower().lstrip(".")
+    if c in ("mp4", "m4v"):
+        return "video/mp4"
+    if c in ("mov", "quicktime"):
+        return "video/quicktime"
+    if c == "webm":
+        return "video/webm"
+    if c == "mkv":
+        return "video/x-matroska"
+    if c == "avi":
+        return "video/x-msvideo"
+    return "video/mp4"
+
+
 def _parse_range_header(value: str | None) -> int:
     """Return highest confirmed byte index from Range header or -1."""
     if not value:
@@ -83,7 +103,14 @@ def _map_http_error(resp: httpx.Response, action: str) -> ConnectorError:
             retryable=False,
         )
     if status == 403:
-        if "quota" in text.lower():
+        text_lower = text.lower()
+        if "ratelimit" in text_lower or "userratelimit" in text_lower:
+            return ConnectorError(
+                f"{action} failed: YouTube API rate limit exceeded ({status}). {text}",
+                kind=FailureKind.TRANSIENT,
+                retryable=True,
+            )
+        if "quota" in text_lower or "dailylimit" in text_lower:
             return ConnectorError(
                 f"{action} failed: YouTube API quota exceeded. {text}",
                 kind=FailureKind.QUOTA,
@@ -124,13 +151,21 @@ def _parse_video(raw: dict[str, Any]) -> VideoStatus:
     status = raw.get("status", {})
     snippet = raw.get("snippet", {})
     processing = raw.get("processingDetails", {})
+    statistics = raw.get("statistics", {})
+    view_count = int(statistics.get("viewCount", 0)) if statistics.get("viewCount") is not None else 0
+    like_count = int(statistics.get("likeCount", 0)) if statistics.get("likeCount") is not None else 0
+    comment_count = int(statistics.get("commentCount", 0)) if statistics.get("commentCount") is not None else 0
+    pub_at = _parse_iso(status.get("publishAt")) or _parse_iso(snippet.get("publishedAt"))
     return VideoStatus(
         video_id=video_id,
         privacy_status=status.get("privacyStatus", "private"),
         upload_status=status.get("uploadStatus", "uploaded"),
         processing_status=processing.get("processingStatus"),
-        publish_at=_parse_iso(status.get("publishAt")),
+        publish_at=pub_at,
         title=snippet.get("title"),
+        view_count=view_count,
+        like_count=like_count,
+        comment_count=comment_count,
         raw=raw,
     )
 
@@ -218,11 +253,12 @@ class YouTubeConnector(PlatformConnector):
                 self.upload_base_url + target_endpoint[len("https://www.googleapis.com") :]
             )
 
+        mime_type = _ensure_video_mime_type(content_type)
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json; charset=UTF-8",
             "X-Upload-Content-Length": str(total_bytes),
-            "X-Upload-Content-Type": content_type,
+            "X-Upload-Content-Type": mime_type,
         }
         with httpx.Client(timeout=60.0) as client:
             try:
@@ -308,22 +344,30 @@ class YouTubeConnector(PlatformConnector):
                 retryable=False,
             )
 
+        # Google's Resumable Upload protocol requires intermediate chunk sizes to be an exact multiple of 256KB (262,144 bytes).
+        min_chunk = 256 * 1024
+        effective_chunk_size = (
+            max(min_chunk, (chunk_size // min_chunk) * min_chunk)
+            if chunk_size >= min_chunk
+            else min_chunk
+        )
+
         offset = start_offset
 
-        with httpx.Client(timeout=120.0) as client:
+        with httpx.Client(timeout=120.0) as client, path.open("rb") as fh:
             while offset < total_bytes:
                 first = offset
-                last = min(first + chunk_size, total_bytes) - 1
+                last = min(first + effective_chunk_size, total_bytes) - 1
                 length = last - first + 1
 
-                with path.open("rb") as fh:
-                    fh.seek(first)
-                    chunk_data = fh.read(length)
+                fh.seek(first)
+                chunk_data = fh.read(length)
 
+                mime_type = _ensure_video_mime_type(content_type)
                 headers = {
                     "Authorization": f"Bearer {access_token}",
                     "Content-Length": str(len(chunk_data)),
-                    "Content-Type": content_type,
+                    "Content-Type": mime_type,
                     "Content-Range": f"bytes {first}-{last}/{total_bytes}",
                 }
 
@@ -372,7 +416,7 @@ class YouTubeConnector(PlatformConnector):
             try:
                 resp = client.get(
                     url,
-                    params={"part": "snippet,status,processingDetails", "id": video_id},
+                    params={"part": "snippet,status,statistics,processingDetails", "id": video_id},
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
             except httpx.HTTPError as exc:
@@ -391,6 +435,43 @@ class YouTubeConnector(PlatformConnector):
         if not items:
             return None
         return _parse_video(items[0])
+
+    def batch_get_videos(
+        self, access_token: str, video_ids: Sequence[str]
+    ) -> dict[str, VideoStatus]:
+        self._check_gate()
+        if not video_ids:
+            return {}
+        result: dict[str, VideoStatus] = {}
+        url = f"{self.api_base_url}/youtube/v3/videos"
+        chunk_size = 50  # YouTube Data API supports up to 50 IDs per call for 1 quota unit
+        with httpx.Client(timeout=30.0) as client:
+            for i in range(0, len(video_ids), chunk_size):
+                chunk = list(video_ids[i : i + chunk_size])
+                try:
+                    resp = client.get(
+                        url,
+                        params={
+                            "part": "snippet,status,statistics,processingDetails",
+                            "id": ",".join(chunk),
+                        },
+                        headers={"Authorization": f"Bearer {access_token}"},
+                    )
+                except httpx.HTTPError as exc:
+                    raise ConnectorError(
+                        f"Network error batch querying videos: {exc}",
+                        kind=FailureKind.TRANSIENT,
+                        retryable=True,
+                    ) from exc
+
+                if resp.status_code != 200:
+                    raise _map_http_error(resp, "batch_get_videos")
+
+                items = (resp.json() or {}).get("items", [])
+                for item in items:
+                    v = _parse_video(item)
+                    result[v.video_id] = v
+        return result
 
     def list_recent_upload_ids(self, access_token: str, channel_id: str) -> list[str]:
         self._check_gate()
@@ -432,6 +513,44 @@ class YouTubeConnector(PlatformConnector):
                 ]
             except Exception:
                 return []
+
+    def list_channel_videos(
+        self, access_token: str, channel_id: str, max_results: int = 50
+    ) -> list[VideoStatus]:
+        self._check_gate()
+        uploads_playlist = (
+            "UU" + channel_id[2:] if channel_id.startswith("UC") else channel_id
+        )
+        video_ids: list[str] = []
+        with httpx.Client(timeout=30.0) as client:
+            try:
+                p_resp = client.get(
+                    f"{self.api_base_url}/youtube/v3/playlistItems",
+                    params={
+                        "part": "snippet,contentDetails",
+                        "playlistId": uploads_playlist,
+                        "maxResults": str(min(max(max_results, 1), 50)),
+                    },
+                    headers={"Authorization": f"Bearer {access_token}"},
+                )
+                if p_resp.status_code == 200:
+                    p_items = (p_resp.json() or {}).get("items", [])
+                    for item in p_items:
+                        vid = (
+                            item.get("snippet", {}).get("resourceId", {}).get("videoId")
+                            or item.get("contentDetails", {}).get("videoId")
+                        )
+                        if vid and vid not in video_ids:
+                            video_ids.append(vid)
+            except Exception as err:
+                log.warning("Failed listing channel uploads for %s: %s", channel_id, err)
+                return []
+
+        if not video_ids:
+            return []
+
+        stats_map = self.batch_get_videos(access_token, video_ids)
+        return [stats_map[vid] for vid in video_ids if vid in stats_map]
 
     def update_video_status(
         self,
@@ -483,13 +602,18 @@ class YouTubeConnector(PlatformConnector):
                     params={"id": video_id},
                     headers={"Authorization": f"Bearer {access_token}"},
                 )
-                return resp.status_code in (200, 204)
-            except Exception as exc:
+            except httpx.HTTPError as exc:
                 raise ConnectorError(
                     f"Network error deleting video: {exc}",
                     kind=FailureKind.TRANSIENT,
                     retryable=True,
                 ) from exc
+
+        if resp.status_code in (200, 204):
+            return True
+        if resp.status_code == 404:
+            return False
+        raise _map_http_error(resp, "delete_video")
 
     def refresh(self, refresh_token: str) -> TokenSet:
         self._check_gate()

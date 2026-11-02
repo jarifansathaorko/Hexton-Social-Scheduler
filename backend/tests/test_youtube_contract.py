@@ -125,6 +125,23 @@ def test_start_resumable_upload_quota_error(
     assert exc_info.value.retryable is False
 
 
+def test_start_resumable_upload_rate_limit_error(
+    youtube_connector: YouTubeConnector, mock_server: MockYouTubeServer
+):
+    MockYouTubeHandler.fail_next_upload = 403
+    MockYouTubeHandler.next_upload_rate_limit_error = True
+    with pytest.raises(ConnectorError) as exc_info:
+        youtube_connector.start_resumable_upload(
+            "token",
+            metadata={},
+            total_bytes=100,
+            content_type="video/mp4",
+            endpoint=f"{mock_server.base_url}/upload/youtube/v3/videos",
+        )
+    assert exc_info.value.kind == FailureKind.TRANSIENT
+    assert exc_info.value.retryable is True
+
+
 def test_probe_upload_incomplete(
     youtube_connector: YouTubeConnector, mock_server: MockYouTubeServer
 ):

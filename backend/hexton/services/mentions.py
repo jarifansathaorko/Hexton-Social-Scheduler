@@ -128,7 +128,7 @@ def current_state(job: ScheduledJob) -> MentionState:
             candidate = MentionState(stored)
         except ValueError:  # pragma: no cover - a corrupted column
             candidate = None
-        if candidate in MENTION_RECORDED_STATES:
+        if candidate is not None and candidate in MENTION_RECORDED_STATES:
             return candidate
 
     return assess(mention_requested=True, text=_text(job)).state
@@ -201,7 +201,7 @@ def begin_manual(session: Session, job: ScheduledJob, *, now: datetime) -> None:
         session,
         job_id=job.id,
         kind=ev.KIND_VALIDATED,
-        message=content.mention_reason,
+        message=content.mention_reason or "",
         payload={"mention_state": MentionState.PENDING_MANUAL.value},
     )
     session.flush()
@@ -248,7 +248,7 @@ def confirm_mention(
         session,
         job_id=job.id,
         kind=ev.KIND_VALIDATED,
-        message=content.mention_reason,
+        message=content.mention_reason or "",
         payload={"attestation": True, "attestation_text": words},
     )
     session.flush()
@@ -270,7 +270,7 @@ def report_removed(session: Session, job: ScheduledJob, *, now: datetime) -> Non
         session,
         job_id=job.id,
         kind=ev.KIND_NEEDS_REVIEW,
-        message=content.mention_reason,
+        message=content.mention_reason or "",
         payload={"mention_state": MentionState.FAILED.value},
     )
     session.flush()

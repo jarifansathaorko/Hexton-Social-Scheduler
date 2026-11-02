@@ -28,7 +28,8 @@ from hexton.domain.media import (
     read_container,
 )
 
-CHUNK = 1024 * 1024
+#: 4MB buffer optimizes SHA-256 preflight throughput for multi-gigabyte video clips on Windows.
+CHUNK = 4 * 1024 * 1024
 #: Head and tail windows scanned for container boxes.
 HEAD_WINDOW = 512 * 1024
 TAIL_WINDOW = 256 * 1024
@@ -82,6 +83,13 @@ class MediaReport:
 
 
 def _digest(path: Path, size: int) -> str:
+    try:
+        with path.open("rb") as fh:
+            if hasattr(hashlib, "file_digest") and size == path.stat().st_size:
+                return hashlib.file_digest(fh, "sha256").hexdigest()
+    except (OSError, AttributeError):
+        pass
+
     h = hashlib.sha256()
     with path.open("rb") as fh:
         read = 0

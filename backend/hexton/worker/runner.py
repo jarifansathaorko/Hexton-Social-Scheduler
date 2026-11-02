@@ -58,6 +58,7 @@ from hexton.domain.jobstate import (
     can_transition,
     video_has_been_public,
 )
+from hexton.domain.media import resolve_content_type
 from hexton.domain.mention import assess as assess_mention
 from hexton.domain.scheduling import check_publish_time, has_missed_window, next_retry_at
 from hexton.domain.validation import apply_transforms, build_insert_body
@@ -287,6 +288,31 @@ class JobRunner:
                 session.commit()
                 return job.state
 
+            # --- 2.5 target channel verification -------------------------------
+            if self.ctx.connector.reaches_platform and job.channel is not None:
+                try:
+                    owned_channels = self.ctx.connector.list_owned_channels(access)
+                except ConnectorError as exc:
+                    self._block(session, job, exc.kind, f"Failed to verify channel identity: {exc}", now)
+                    session.commit()
+                    return job.state
+                owned_ids = {c.channel_id for c in owned_channels}
+                if job.channel.channel_id not in owned_ids:
+                    owned_desc = ", ".join(f"'{c.title}' ({c.channel_id})" for c in owned_channels) or "(no channels)"
+                    self._block(
+                        session,
+                        job,
+                        FailureKind.VALIDATION,
+                        f"Target channel mismatch: The connection's credential is authorized for {owned_desc}, "
+                        f"NOT the selected target channel '{job.channel.title}' ({job.channel.channel_id}). "
+                        f"Hexton strictly refuses to upload to the wrong YouTube channel. "
+                        f"Please connect or select the connection authorized for '{job.channel.title}' in the editor.",
+                        now,
+                        kind_name=ev.KIND_PREFLIGHT_FAILED,
+                    )
+                    session.commit()
+                    return job.state
+
             # --- 3. reconcile before sending anything new ----------------------
             if job.insert_may_have_succeeded:
                 result = self._reconcile(session, job, access, now)
@@ -412,7 +438,7 @@ class JobRunner:
                 job.published_at_remote,
                 job.observations[-1].privacy_status if job.observations else None,
             ),
-            min_lead_minutes=job.schedule.min_lead_minutes,
+            min_lead_minutes=min(job.schedule.min_lead_minutes, self.ctx.settings.min_lead_minutes),
             warning_lead_minutes=self.ctx.settings.warning_lead_minutes,
         )
         if check.verdict.value == "missed":
@@ -675,7 +701,7 @@ class JobRunner:
         assert job.connection is not None
         upload = _current_session(job)
         total = job.media.size_bytes
-        content_type = job.media.container or "video/mp4"
+        content_type = resolve_content_type(job.media.path, job.media.container)
 
         if upload is None or not upload.session_uri:
             if not quota_mod.can_afford_on(
@@ -761,7 +787,9 @@ class JobRunner:
         start_offset = max(0, upload.bytes_uploaded)
 
         def on_progress(done: int, total_bytes: int) -> None:
-            self._report_progress(job.id, done, total_bytes, now)
+            # Use current wall-clock time so prolonged multi-chunk transfers continuously
+            # refresh lease expiry, preventing premature lease expiry during large uploads.
+            self._report_progress(job.id, done, total_bytes, datetime.now(UTC))
 
         try:
             outcome = self.ctx.connector.perform_upload(
@@ -1057,7 +1085,9 @@ class JobRunner:
     # Progress
     # ------------------------------------------------------------------
 
-    def _report_progress(self, job_id: int, done: int, total: int, now: datetime) -> None:
+    def _report_progress(
+        self, job_id: int, done: int, total: int, now: datetime | None = None
+    ) -> None:
         """Publish progress and keep the lease alive.
 
         On its own short transaction so a progress write cannot hold the lock the
@@ -1072,6 +1102,7 @@ class JobRunner:
         ``on_progress`` on its way through, so the exception unwinds the transfer with
         us.
         """
+        current_time = now or datetime.now(UTC)
         percent = int(done * 100 / total) if total else 0
         with self.ctx.sessions() as session:
             job = session.get(ScheduledJob, job_id)
@@ -1083,7 +1114,7 @@ class JobRunner:
             self.ctx.engine,
             job_id=job_id,
             owner=self.owner,
-            now=now,
+            now=current_time,
             lease_seconds=self.ctx.settings.lease_seconds,
         )
         if not held:

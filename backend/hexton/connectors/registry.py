@@ -9,7 +9,9 @@ environment variable cannot put a fake provider behind a real schedule.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from enum import Enum
+from typing import Any
 
 from hexton.config import Settings
 from hexton.connectors.base import PlatformConnector
@@ -85,7 +87,7 @@ def select_sheets_connector_factory(
     *,
     profile: BuildProfile = BuildProfile.DEVELOPMENT,
     fake_state: SheetState | None = None,
-):
+) -> Callable[[Any], SheetConnector]:
     """Return a callable ``(credentials) -> SheetConnector``.
 
     ``credentials`` is the OAuth credential object for the Sheets connection. The fake

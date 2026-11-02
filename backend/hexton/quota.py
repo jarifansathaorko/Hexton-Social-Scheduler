@@ -13,7 +13,10 @@ economical one — a follow-up reschedule spends fifty times as much.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import Enum
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import Engine, select
@@ -29,10 +32,55 @@ DAILY_UNITS = 10_000
 #: budget. The upload queue yields to it.
 RESERVE_UNITS = 200
 
-#: Documented per-call costs.
+#: Documented per-call costs for local ledger accounting.
 COST_INSERT = 1
 COST_UPDATE = 50
 COST_READ = 1
+
+#: Official Google YouTube Data API v3 live cost benchmarks (June 2026 granular quota bucket transition).
+#: In June 2026, YouTube transitioned to dedicated quota buckets for heavy operations.
+LIVE_COST_UPLOAD = 1600
+LIVE_COST_SEARCH = 100
+LIVE_COST_UPDATE = 50
+LIVE_COST_READ = 1
+
+
+class QuotaBucket(str, Enum):
+    """Operation quota buckets under Google's granular quota architecture."""
+
+    UPLOAD = "upload"  # videos.insert (heavy upload operation bucket)
+    SEARCH = "search"  # search.list (100 units)
+    MUTATION = "mutation"  # videos.update, videos.rate, playlistItems (50 units)
+    READ = "read"  # channels.list, videos.list (1 unit)
+
+
+@dataclass(frozen=True)
+class QuotaCostEstimate:
+    """Estimated quota impact of an operation."""
+
+    operation: str
+    bucket: QuotaBucket
+    local_ledger_units: int
+    live_estimated_units: int
+
+
+@dataclass(frozen=True)
+class QuotaSummary:
+    """Current quota status and operational capacity."""
+
+    provider: str
+    daily_budget: int
+    units_used: int
+    units_remaining: int
+    reserve_units: int
+    window_start: datetime
+    next_reset: datetime
+    can_upload: bool
+    can_read: bool
+    can_mutate: bool
+    is_warning: bool
+    is_exhausted: bool
+
 
 PACIFIC = ZoneInfo("America/Los_Angeles")
 
@@ -48,12 +96,12 @@ def next_reset(now: datetime) -> datetime:
     return window_start(now) + timedelta(days=1)
 
 
-def _window_where(provider: str, now: datetime):
+def _window_where(provider: str, now: datetime) -> tuple[Any, Any]:
     start = window_start(now)
     return QuotaLedger.provider == provider, QuotaLedger.window_start == start
 
 
-def _upsert(provider: str, now: datetime, units: int):
+def _upsert(provider: str, now: datetime, units: int) -> Any:
     """The single statement that adds spend to the current window.
 
     An upsert rather than read-then-write, so two processes racing on the same window
@@ -77,7 +125,7 @@ def units_used_on(session: Session, provider: str, now: datetime) -> int:
     row = session.execute(
         select(QuotaLedger.units_used).where(provider_filter, window_filter)
     ).scalar_one_or_none()
-    return int(row or 0)
+    return row or 0
 
 
 def add_units_on(session: Session, provider: str, units: int, now: datetime) -> int:
@@ -145,3 +193,77 @@ def retry_at_reset(now: datetime) -> datetime:
     that are already unavailable.
     """
     return next_reset(now) + timedelta(minutes=1)
+
+
+def estimate_operation_cost(operation: str) -> QuotaCostEstimate:
+    """Estimate local ledger spend and live Google API quota impact.
+
+    Accounts for the June 2026 granular quota bucket transition where ``videos.insert``
+    and ``search.list`` belong to distinct quota buckets.
+    """
+    op = operation.lower().strip()
+    if "insert" in op or "upload" in op:
+        return QuotaCostEstimate(
+            operation=operation,
+            bucket=QuotaBucket.UPLOAD,
+            local_ledger_units=COST_INSERT,
+            live_estimated_units=LIVE_COST_UPLOAD,
+        )
+    if "search" in op:
+        return QuotaCostEstimate(
+            operation=operation,
+            bucket=QuotaBucket.SEARCH,
+            local_ledger_units=100,
+            live_estimated_units=LIVE_COST_SEARCH,
+        )
+    if "update" in op or "rate" in op:
+        return QuotaCostEstimate(
+            operation=operation,
+            bucket=QuotaBucket.MUTATION,
+            local_ledger_units=COST_UPDATE,
+            live_estimated_units=LIVE_COST_UPDATE,
+        )
+    return QuotaCostEstimate(
+        operation=operation,
+        bucket=QuotaBucket.READ,
+        local_ledger_units=COST_READ,
+        live_estimated_units=LIVE_COST_READ,
+    )
+
+
+def format_quota_exhausted_message(provider: str, operation: str, now: datetime) -> str:
+    """Actionable user-facing message when quota is exhausted, with exact Pacific reset time."""
+    reset_dt = next_reset(now)
+    pacific_time = reset_dt.astimezone(PACIFIC).strftime("%Y-%m-%d %H:%M %Z")
+    utc_time = reset_dt.strftime("%H:%M UTC")
+    estimate = estimate_operation_cost(operation)
+    return (
+        f"The {provider} daily quota has no room for '{operation}' (bucket: {estimate.bucket.value}). "
+        f"The next quota window opens at {pacific_time} (midnight Pacific, {utc_time}). "
+        f"Jobs are deferred until then to avoid burning unavailable calls."
+    )
+
+
+def get_quota_summary(engine: Engine, provider: str, now: datetime) -> QuotaSummary:
+    """Generate an authoritative summary of quota health and operational capacity."""
+    used = units_used(engine, provider, now)
+    rem = remaining(engine, provider, now)
+    w_start = window_start(now)
+    n_reset = next_reset(now)
+    upload_afford = can_afford(engine, provider, COST_INSERT, now)
+    read_afford = can_afford(engine, provider, COST_READ, now)
+    mutate_afford = can_afford(engine, provider, COST_UPDATE, now)
+    return QuotaSummary(
+        provider=provider,
+        daily_budget=DAILY_UNITS,
+        units_used=used,
+        units_remaining=rem,
+        reserve_units=RESERVE_UNITS,
+        window_start=w_start,
+        next_reset=n_reset,
+        can_upload=upload_afford,
+        can_read=read_afford,
+        can_mutate=mutate_afford,
+        is_warning=rem < 1000,
+        is_exhausted=not upload_afford,
+    )

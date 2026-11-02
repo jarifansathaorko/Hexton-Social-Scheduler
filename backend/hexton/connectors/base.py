@@ -13,6 +13,7 @@ uniformly instead of being scattered through network code.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -59,6 +60,9 @@ class VideoStatus:
     processing_status: str | None = None
     publish_at: datetime | None = None
     title: str | None = None
+    view_count: int = 0
+    like_count: int = 0
+    comment_count: int = 0
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -170,6 +174,17 @@ class PlatformConnector(ABC):
     def get_video(self, access_token: str, video_id: str) -> VideoStatus | None:
         """``videos.list(id=...)``. Returns ``None`` when the ID does not resolve."""
 
+    def batch_get_videos(
+        self, access_token: str, video_ids: Sequence[str]
+    ) -> dict[str, VideoStatus]:
+        """Fetch multiple videos in batch (up to 50 per call). Default implementation iterates."""
+        result: dict[str, VideoStatus] = {}
+        for vid in video_ids:
+            v = self.get_video(access_token, vid)
+            if v is not None:
+                result[vid] = v
+        return result
+
     @abstractmethod
     def list_recent_upload_ids(self, access_token: str, channel_id: str) -> list[str]:
         """Candidate video IDs from the documented reconciliation ladder (R2/R3).
@@ -177,6 +192,12 @@ class PlatformConnector(ABC):
         Evidence only. Never sufficient on its own to adopt a video ID: an unrelated
         manual upload at the same moment is indistinguishable.
         """
+
+    def list_channel_videos(
+        self, access_token: str, channel_id: str, max_results: int = 50
+    ) -> list[VideoStatus]:
+        """Fetch published videos for a channel with live statistics (views, likes, comments)."""
+        return []
 
     # -- publication changes --------------------------------------------------
 

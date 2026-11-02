@@ -3,18 +3,37 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from hexton.api.deps import SessionDep
-from hexton.api.schemas import MediaAddIn, MediaCheckOut, MediaIssueOut, MediaOut
+from hexton.api.deps import CtxDep, SessionDep
+from hexton.api.schemas import (
+    MediaAddIn,
+    MediaCheckOut,
+    MediaIssueOut,
+    MediaOut,
+    MediaPickIn,
+    MediaPickOut,
+)
+from hexton.bootstrap import AppContext
 from hexton.db import events as ev
 from hexton.db.models import MediaFile, ScheduledJob
 from hexton.media import is_allowed_path, validate_file, verify_unchanged
+from hexton.media.picker import pick_video_file
 
 router = APIRouter(prefix="/api/media", tags=["media"])
+
+
+@router.post("/pick", response_model=MediaPickOut)
+def pick(payload: MediaPickIn | None = None) -> MediaPickOut:
+    """Prompt the operator to select a video file using the native OS file picker."""
+    initial = payload.initial_dir if payload else None
+    chosen = pick_video_file(initial_dir=initial)
+    return MediaPickOut(path=chosen)
 
 
 @router.post("/check", response_model=MediaCheckOut)
@@ -90,6 +109,71 @@ def add(payload: MediaAddIn, session: Session = SessionDep) -> MediaOut:
     return MediaOut.model_validate(record)
 
 
+@router.post("/upload", response_model=MediaOut, status_code=201)
+async def upload(
+    request: Request,
+    filename: str = Query(..., min_length=1, max_length=255),
+    session: Session = SessionDep,
+    ctx: AppContext = CtxDep,
+) -> MediaOut:
+    """Accept video file stream from the browser, save to media directory, and register."""
+    clean_name = Path(filename).name
+    if not clean_name or clean_name in (".", ".."):
+        raise HTTPException(status_code=400, detail="Invalid filename provided.")
+
+    ctx.settings.ensure_directories()
+    dest_dir = ctx.settings.media_dir
+    dest_path = dest_dir / clean_name
+
+    stem = dest_path.stem
+    suffix = dest_path.suffix
+    counter = 1
+    while dest_path.exists():
+        dest_path = dest_dir / f"{stem}_{counter}{suffix}"
+        counter += 1
+
+    try:
+        with dest_path.open("wb") as buffer:
+            async for chunk in request.stream():
+                buffer.write(chunk)
+    except Exception as exc:
+        dest_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {exc}") from exc
+
+    report = validate_file(dest_path)
+    if not report.ok:
+        dest_path.unlink(missing_ok=True)
+        messages = "; ".join(i.message for i in report.blocking_issues)
+        raise HTTPException(
+            status_code=422,
+            detail=f"That file cannot be added: {messages}",
+        )
+
+    path_str = str(dest_path.resolve())
+    existing = session.execute(
+        select(MediaFile).where(MediaFile.path == path_str)
+    ).scalar_one_or_none()
+    now = datetime.now(UTC)
+    record = existing or MediaFile(path=path_str)
+    record.original_name = clean_name
+    record.sha256 = report.sha256 or ""
+    record.size_bytes = report.size_bytes
+    record.duration_seconds = report.duration_seconds
+    record.container = report.container
+    record.is_valid = True
+    record.validated_at = now
+    record.verified_at = now
+    record.issues = [
+        {"code": i.code, "message": i.message, "blocking": i.blocking}
+        for i in report.issues
+    ]
+    if existing is None:
+        session.add(record)
+    session.commit()
+    session.refresh(record)
+    return MediaOut.model_validate(record)
+
+
 @router.get("", response_model=list[MediaOut])
 def list_media(session: Session = SessionDep) -> list[MediaOut]:
     rows = session.execute(select(MediaFile).order_by(MediaFile.id.desc())).scalars().all()
@@ -149,7 +233,7 @@ def recheck(media_id: int, session: Session = SessionDep) -> MediaCheckOut:
 
 
 @router.get("/{media_id}/jobs")
-def jobs_using(media_id: int, session: Session = SessionDep) -> dict:
+def jobs_using(media_id: int, session: Session = SessionDep) -> dict[str, Any]:
     rows = (
         session.execute(select(ScheduledJob).where(ScheduledJob.media_id == media_id))
         .scalars()

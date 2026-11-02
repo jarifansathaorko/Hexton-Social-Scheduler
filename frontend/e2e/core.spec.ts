@@ -19,6 +19,7 @@ const NAV_LABELS = [
   "Dashboard",
   "Schedule Calendar",
   "Upload Queue",
+  "1K+ Deliverables",
   "Media Library",
   "YouTube Channels",
   "Reports & Google Sheets",

@@ -16,6 +16,9 @@ Write-Host "==> Step 2: Compiling standalone executable with PyInstaller..." -Fo
 & "$RepoRoot\backend\.venv\Scripts\pyinstaller.exe" --noconfirm --clean "$RepoRoot\hexton.spec"
 
 if (Test-Path "$RepoRoot\dist\Hexton.exe") {
+    if (-not (Test-Path "$RepoRoot\dist\.env") -and (Test-Path "$RepoRoot\backend\.env")) {
+        Copy-Item "$RepoRoot\backend\.env" "$RepoRoot\dist\.env"
+    }
     $ExeSize = (Get-Item "$RepoRoot\dist\Hexton.exe").Length / 1MB
     Write-Host ("==> Success! Standalone executable compiled: dist\Hexton.exe ({0:N1} MB)" -f $ExeSize) -ForegroundColor Green
 } else {

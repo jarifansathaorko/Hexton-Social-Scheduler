@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from hexton.domain.scheduling import (
-    DEFAULT_MIN_LEAD_MINUTES,
     ScheduleVerdict,
     ZoneError,
     check_publish_time,
@@ -94,10 +93,17 @@ def test_past_time_message_says_it_would_publish_immediately() -> None:
 
 def test_too_soon_is_blocked_at_the_configured_minimum() -> None:
     check = check_publish_time(
-        NOW + timedelta(minutes=DEFAULT_MIN_LEAD_MINUTES - 1), now=NOW, min_lead_minutes=30
+        NOW + timedelta(minutes=29), now=NOW, min_lead_minutes=30
     )
     assert check.verdict is ScheduleVerdict.TOO_SOON
     assert {i.code for i in check.blocking} == {"publish_at_too_soon"}
+
+
+def test_zero_min_lead_minutes_allows_immediate_schedule() -> None:
+    check = check_publish_time(NOW + timedelta(minutes=1), now=NOW, min_lead_minutes=0)
+    assert check.ok
+    assert check.issues == ()
+
 
 
 def test_inside_the_warning_band_is_allowed_but_flagged() -> None:
@@ -170,3 +176,29 @@ def test_backoff_attempt_is_one_based() -> None:
 def test_backoff_refuses_a_naive_now() -> None:
     with pytest.raises(ValueError):
         next_retry_at(1, now=datetime(2026, 10, 11, 12, 0))
+
+
+def test_peak_hour_weight_scores_evening_prime() -> None:
+    # 19:00 EST (UTC-5 => 00:00 UTC next day)
+    from hexton.domain.scheduling import get_peak_hour_weight
+    evening_est = datetime(2026, 10, 11, 23, 0, tzinfo=UTC) # 19:00 EDT (UTC-4)
+    weight = get_peak_hour_weight(evening_est, target_tz="America/New_York")
+    assert weight >= 0.95
+
+
+def test_find_optimal_slots_avoids_collisions() -> None:
+    from hexton.domain.scheduling import find_optimal_slots
+    start = datetime(2026, 10, 12, 10, 0, tzinfo=UTC)
+    existing = [
+        datetime(2026, 10, 12, 14, 0, tzinfo=UTC),
+        datetime(2026, 10, 12, 15, 0, tzinfo=UTC),
+    ]
+    slots = find_optimal_slots(existing, start_time=start, min_gap_hours=2.5, limit=4)
+    assert len(slots) > 0
+    for s in slots:
+        dt = datetime.fromisoformat(s["publish_at_utc"])
+        # Must not collide within 2.5h of any existing slot
+        for ex in existing:
+            assert abs((dt - ex).total_seconds()) / 3600.0 >= 2.5
+        assert s["score"] > 0
+        assert "display_local" in s

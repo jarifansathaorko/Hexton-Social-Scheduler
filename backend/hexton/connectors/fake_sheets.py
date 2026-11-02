@@ -101,7 +101,7 @@ class FakeSheetsConnector:
 
         appended: list[dict[str, str]] = []
         for index, row in enumerate(rows):
-            key = str(row.get(KEY_COLUMN, ""))
+            key = row.get(KEY_COLUMN, "")
             if not key:
                 raise SheetError("invalid", "a report row was built without a Sync Key")
             if state.fail_after_rows is not None and index >= state.fail_after_rows:
@@ -124,7 +124,7 @@ class FakeSheetsConnector:
             raise SheetError("ambiguous", "the append may have reached the server")
 
         return SheetWrite(
-            appended_keys=tuple(str(r[KEY_COLUMN]) for r in appended), skipped_keys=()
+            appended_keys=tuple(r[KEY_COLUMN] for r in appended), skipped_keys=()
         )
 
     def test_write(self, destination: SheetDestination, key: str) -> SheetWrite:

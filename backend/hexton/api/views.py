@@ -156,6 +156,10 @@ def job_to_out(job: ScheduledJob, zone: ZoneInfo, *, now: datetime | None = None
         created_at=job.created_at,
         updated_at=job.updated_at,
         cancelled_at=job.cancelled_at,
+        view_count=getattr(job, "view_count", 0) or 0,
+        like_count=getattr(job, "like_count", 0) or 0,
+        comment_count=getattr(job, "comment_count", 0) or 0,
+        last_stats_synced_at=getattr(job, "last_stats_synced_at", None),
     )
 
 

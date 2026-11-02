@@ -244,7 +244,7 @@ class Schedule(Base, TimestampMixin):
     display_timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
     #: The minimum lead time in force when the plan was made, recorded so a later
     #: change to the setting cannot retroactively invalidate an accepted schedule.
-    min_lead_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    min_lead_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     #: Report-date component of the Sheets sync key.
     report_date: Mapped[datetime | None] = mapped_column(UTCDateTime())
 
@@ -260,6 +260,9 @@ class ScheduledJob(Base, TimestampMixin):
     __table_args__ = (
         Index("ix_job_claim", "state", "next_attempt_at"),
         Index("ix_job_lease", "lease_expires_at"),
+        Index("ix_job_sweep", "state", "next_poll_at"),
+        Index("ix_job_channel_identity", "channel_identity_id"),
+        Index("ix_job_view_count", "view_count"),
         UniqueConstraint("idempotency_key"),
     )
 
@@ -327,6 +330,16 @@ class ScheduledJob(Base, TimestampMixin):
     #: Live upload progress for the queue UI. Updated in place; the durable record of
     #: what happened lives in ``job_event``.
     progress_percent: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    #: Live YouTube video performance analytics
+    view_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    like_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    comment_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_stats_synced_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
+    #: Simple user note for creator sign-off: "approved" | "rejected" | None
+    creator_approval: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: Audience demographic country breakdown and view percentages
+    demographics: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
 
     cancelled_at: Mapped[datetime | None] = mapped_column(UTCDateTime())
 

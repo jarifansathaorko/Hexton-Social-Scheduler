@@ -46,3 +46,5 @@ storage/
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+.license_store/

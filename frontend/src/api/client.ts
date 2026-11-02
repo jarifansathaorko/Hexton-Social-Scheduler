@@ -126,4 +126,27 @@ export const api = {
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", body }),
   put: <T>(path: string, body?: unknown) => request<T>(path, { method: "PUT", body }),
   del: <T>(path: string) => request<T>(path, { method: "DELETE" }),
+  upload: async <T>(path: string, body: BodyInit) => {
+    await ensureSession();
+    const headers: Record<string, string> = {
+      Accept: "application/json",
+      "Content-Type": "application/octet-stream",
+    };
+    if (csrfToken) headers["X-CSRF-Token"] = csrfToken;
+    const response = await fetch(path, {
+      method: "POST",
+      credentials: "same-origin",
+      headers,
+      body,
+    });
+    if (!response.ok) {
+      const payload = await safeJson(response);
+      const detail =
+        (payload as { detail?: string } | null)?.detail ??
+        `Upload failed with status ${response.status}.`;
+      const code = (payload as { code?: string } | null)?.code;
+      throw new ApiError(response.status, detail, code);
+    }
+    return (await response.json()) as T;
+  },
 };

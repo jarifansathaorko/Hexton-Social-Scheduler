@@ -247,6 +247,13 @@ class FakeConnector(PlatformConnector):
         self._maybe_fail("list_recent_upload_ids")
         return list(self.state.recent_upload_ids)
 
+    def list_channel_videos(
+        self, access_token: str, channel_id: str, max_results: int = 50
+    ) -> list[VideoStatus]:
+        self._record("list_channel_videos", channel_id)
+        self._maybe_fail("list_channel_videos")
+        return list(self.state.videos.values())[:max_results]
+
     # -- publication changes --------------------------------------------------
 
     def update_video_status(

@@ -24,7 +24,7 @@ from sqlalchemy.orm import Session, selectinload
 
 from hexton import quota as quota_mod
 from hexton.bootstrap import AppContext
-from hexton.connectors.base import ConnectorError
+from hexton.connectors.base import ConnectorError, VideoStatus
 from hexton.db import events as ev
 from hexton.db.models import ScheduledJob
 from hexton.domain.jobstate import FailureKind, JobState, PollResult
@@ -146,14 +146,15 @@ class PublishConfirmationSweep:
 
         if not quota_mod.can_afford_on(session, provider, quota_mod.COST_READ, now):
             # Defer rather than fail: the budget returns at the documented reset.
-            job.next_poll_at = quota_mod.retry_at_reset(now)
+            next_poll = quota_mod.retry_at_reset(now)
+            job.next_poll_at = next_poll
             ev.record_event(
                 session,
                 job_id=job.id,
                 kind=ev.KIND_VERIFICATION_PENDING,
                 message="Publication verification is deferred until the next quota "
                 "window; the video's state is unchanged.",
-                payload={"next_poll_at": job.next_poll_at.isoformat()},
+                payload={"next_poll_at": next_poll.isoformat()},
             )
             return "quota_deferred"
 
@@ -184,6 +185,18 @@ class PublishConfirmationSweep:
             status = self.ctx.connector.get_video(access, job.video_id)
             quota_mod.add_units_on(session, provider, quota_mod.COST_READ, now)
         except ConnectorError as exc:
+            if exc.kind is FailureKind.QUOTA:
+                next_poll = quota_mod.retry_at_reset(now)
+                job.poll_result = PollResult.UNKNOWN.value
+                job.next_poll_at = next_poll
+                ev.record_event(
+                    session,
+                    job_id=job.id,
+                    kind=ev.KIND_VERIFICATION_PENDING,
+                    message=f"Publication verification deferred until next quota window: {exc}",
+                    payload={"next_poll_at": next_poll.isoformat()},
+                )
+                return "quota_deferred"
             if exc.kind is FailureKind.AUTHORIZATION:
                 job.poll_result = PollResult.UNKNOWN.value
                 job.next_poll_at = now + timedelta(minutes=15)
@@ -226,7 +239,7 @@ class PublishConfirmationSweep:
         self,
         session: Session,
         job: ScheduledJob,
-        status,
+        status: VideoStatus,
         publish_at: datetime | None,
         now: datetime,
     ) -> str:
@@ -241,6 +254,10 @@ class PublishConfirmationSweep:
             job.poll_result = PollResult.CONFIRMED.value
             job.next_poll_at = None
             job.video_url = job.video_url or canonical_url(job.video_id)
+            job.view_count = status.view_count
+            job.like_count = status.like_count
+            job.comment_count = status.comment_count
+            job.last_stats_synced_at = now
             current = JobState(job.state)
             if current is not JobState.PUBLISHED:
                 self._to(session, job, JobState.PUBLISHED, now)
@@ -275,7 +292,9 @@ class PublishConfirmationSweep:
             )
         return "pending"
 
-    def _pace(self, session: Session, job: ScheduledJob, publish_at, now: datetime) -> None:
+    def _pace(
+        self, session: Session, job: ScheduledJob, publish_at: datetime | None, now: datetime
+    ) -> None:
         """Choose the next poll time, and stop at the documented ceiling."""
         polls = len([o for o in job.observations if not o.inconclusive])
         if polls >= MAX_POLLS_PER_JOB:

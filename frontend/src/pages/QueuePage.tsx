@@ -4,13 +4,11 @@ import { UploadQueue } from "../components/UploadQueue";
 import { useJobs, useWorkerStatus } from "../hooks/api";
 
 /**
- * Upload queue.
+ * Upload Queue Page.
  *
- * Live updates come from the TanStack Query refetch interval rather than from the SSE
- * stream, so the queue keeps working with the API's own polling and does not depend on
- * a second live channel being healthy. The SSE endpoint exists for a future denser
- * view; using it here would add a failure mode to a screen whose whole job is to show
- * failure modes.
+ * Implements Panel 3 of the visual reference:
+ * Progress is read from the worker's own record. Transfers completed vs publication verified
+ * remain strictly distinguished.
  */
 export function QueuePage() {
   const [params, setParams] = useSearchParams();
@@ -32,19 +30,20 @@ export function QueuePage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Upload Queue</h1>
-          <p className="mt-1 text-sm text-ink-muted">
-            Progress is read from the worker's own record, not from this tab. An upload
-            is shown as finished when the bytes have landed; it is only ever counted as
-            published once YouTube has been observed to say so.
+          <h1 className="text-2xl font-bold tracking-tight text-white">Upload Queue</h1>
+          <p className="mt-1 text-sm text-[var(--hs-text-secondary)]">
+            Monitor active video uploads and publishing progress in real time.
           </p>
         </div>
         {!worker.data?.alive && (
-          <div className="rounded-md border border-cue-attention/50 bg-cue-attention/10 px-3 py-2 text-sm text-cue-attention">
-            No worker heartbeat. Queued jobs are parked, not progressing. Start it with{" "}
-            <code className="font-mono text-xs">hexton serve</code>.
+          <div className="rounded-xl border border-[var(--hs-warning)]/40 bg-[var(--hs-warning)]/10 px-4 py-2.5 text-xs text-[var(--hs-warning)] flex items-center gap-2 shadow-sm">
+            <span className="h-2 w-2 rounded-full bg-[var(--hs-warning)] shrink-0" />
+            <span>
+              No worker heartbeat. Queued jobs are parked, not progressing. Start it with{" "}
+              <code className="font-mono text-white bg-black/40 px-1 py-0.5 rounded">hexton serve</code>.
+            </span>
           </div>
         )}
       </header>

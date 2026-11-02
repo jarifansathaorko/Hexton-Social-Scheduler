@@ -1,372 +1,474 @@
-import { useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { ApiError } from "../api/client";
-import type { Connection, ConnectionAction } from "../api/types";
+import {
+  IconAlertTriangle,
+  IconExternalLink,
+  IconMoreVertical,
+  IconPlus,
+  IconRefreshCw,
+  IconSearch,
+  IconTrash,
+  IconYouTube,
+} from "../components/Icons";
 import {
   useAuthorizeConnection,
-  useConfirmChannel,
   useConnections,
-  useDiagnostic,
-  useDisableConnection,
-  useEnableConnection,
+  useCreateConnection,
+  useDeleteConnection,
   useRefreshIdentities,
-  useRevokeConnectionAction,
-  useUnconfirmChannel,
 } from "../hooks/api";
-import { formatWhen } from "../lib/state";
 
-/**
- * YouTube channels.
- *
- * This screen exists to answer one question honestly: *which channels can this
- * connection actually publish to?* A channel listed here is one that the authorized
- * connection resolved and that an operator has since confirmed by hand. Nothing else
- * is shown, because a channel name that merely appears in a list reads as "available"
- * — and `DF-18` records that a brand-account channel's publishing path is a separate,
- * unverified claim until a second identity is authorized against it.
- *
- * Disable and revoke are separate buttons that report what they did *and what they
- * did not do* (`COMP-07`). They are never folded into one "disconnect".
- */
+interface AccountItem {
+  id: string;
+  connectionId: number;
+  handle: string;
+  title: string;
+  platform: "YouTube";
+  channelId: string | null;
+  needsRelink: boolean;
+  statusText: string;
+}
+
 export function ChannelsPage() {
   const connections = useConnections();
-  const rows = connections.data ?? [];
-
-  return (
-    <div className="flex flex-col gap-6">
-      <header>
-        <h1 className="text-2xl font-semibold tracking-tight">YouTube Channels</h1>
-        <p className="mt-1 text-sm text-ink-muted">
-          Channels are listed only when the connection that resolved them is still
-          authorized and the identity has been confirmed by you. Selecting a channel
-          elsewhere in Hexton never widens what the connection can reach.
-        </p>
-      </header>
-
-      {connections.isLoading ? (
-        <p className="text-ink-muted">Loading…</p>
-      ) : rows.length === 0 ? (
-        <section className="card p-6">
-          <h2 className="text-base font-semibold">No connections yet</h2>
-          <p className="mt-2 max-w-2xl text-sm text-ink-muted">
-            A connection is one Google authorization. The live YouTube connector is not
-            enabled in this build — Phase 0 recorded FEAS-01 and FEAS-02 as blocked
-            pending a Google Cloud project, an OAuth consent configuration and a test
-            channel. Until those gate items pass, nothing here can reach Google.
-          </p>
-          <Link className="btn mt-4" to="/settings">
-            Open diagnostics
-          </Link>
-        </section>
-      ) : (
-        rows.map((connection) => <ConnectionCard key={connection.id} connection={connection} />)
-      )}
-    </div>
-  );
-}
-
-function ConnectionCard({ connection }: { connection: Connection }) {
+  const createConnection = useCreateConnection();
   const authorize = useAuthorizeConnection();
-  const refresh = useRefreshIdentities();
-  const disable = useDisableConnection();
-  const enable = useEnableConnection();
-  const revoke = useRevokeConnectionAction();
-  const confirmChannel = useConfirmChannel();
-  const unconfirmChannel = useUnconfirmChannel();
-  const diagnostic = useDiagnostic(connection.id);
+  const deleteConnection = useDeleteConnection();
+  const refreshIdentities = useRefreshIdentities();
 
-  const [result, setResult] = useState<ConnectionAction | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<"connected" | "profile">("connected");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [filterPlatform, setFilterPlatform] = useState<"all" | "youtube">("all");
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  const fail = (exc: unknown) => setError(exc instanceof ApiError ? exc.message : "That operation failed.");
-  const active =
-    connection.status === "active" || connection.status === "enabled" || connection.status === "connected";
-  const revoked = connection.status === "revoked" || connection.authorized_data_deleted_at !== null;
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  // Handle OAuth callback status and close 3-dots dropdown
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const err = params.get("error");
+    if (err === "no_channel") {
+      setConnectError(
+        "No YouTube channel was found for that Google account. Please ensure the Google account has a YouTube channel created, or choose an account with a channel."
+      );
+    } else if (err === "cancelled") {
+      setConnectError("Channel authorization was cancelled.");
+    } else if (err) {
+      setConnectError(`Channel connection failed: ${err.replace(/_/g, " ")}`);
+    } else if (params.get("authorized") === "true") {
+      // Clean query parameter from URL
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
+    const handleOutsideClick = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpenMenuId(null);
+      }
+    };
+    document.addEventListener("mousedown", handleOutsideClick);
+    return () => document.removeEventListener("mousedown", handleOutsideClick);
+  }, []);
+
+  // Map connections into account items
+  const allAccounts: AccountItem[] = useMemo(() => {
+    const rawConnections = connections.data ?? [];
+    const ytConns = rawConnections.filter((c) => c.provider === "youtube");
+    const items: AccountItem[] = [];
+
+    for (const conn of ytConns) {
+      const isExpired =
+        conn.status === "expired" ||
+        (conn.token_expires_at !== null &&
+          Date.parse(conn.token_expires_at) < Date.now() &&
+          conn.last_token_check_ok === false);
+      const isRevoked = conn.status === "revoked" || conn.authorized_data_deleted_at !== null;
+      const isDisconnected = conn.status === "disconnected";
+      const needsRelink = isExpired || isRevoked || isDisconnected;
+
+      if (conn.channels && conn.channels.length > 0) {
+        for (const ch of conn.channels) {
+          const rawHandle = ch.handle?.trim();
+          const cleanHandle = rawHandle
+            ? rawHandle.startsWith("@")
+              ? rawHandle
+              : `@${rawHandle}`
+            : ch.title
+              ? ch.title.startsWith("@")
+                ? ch.title
+                : `@${ch.title.toLowerCase().replace(/\s+/g, "")}`
+              : "@youtube";
+
+          items.push({
+            id: `conn-${conn.id}-ch-${ch.id}`,
+            connectionId: conn.id,
+            handle: cleanHandle,
+            title: ch.title || "YouTube Channel",
+            platform: "YouTube",
+            channelId: ch.channel_id,
+            needsRelink,
+            statusText: isRevoked ? "Revoked" : isExpired ? "Expired" : isDisconnected ? "Disconnected" : "Active",
+          });
+        }
+      }
+    }
+
+    return items;
+  }, [connections.data]);
+
+  // Filter & Search
+  const filteredAccounts = useMemo(() => {
+    return allAccounts.filter((item) => {
+      if (filterPlatform !== "all" && item.platform.toLowerCase() !== filterPlatform) {
+        return false;
+      }
+      if (searchQuery.trim()) {
+        const query = searchQuery.trim().toLowerCase();
+        return (
+          item.handle.toLowerCase().includes(query) ||
+          item.title.toLowerCase().includes(query)
+        );
+      }
+      return true;
+    });
+  }, [allAccounts, filterPlatform, searchQuery]);
+
+  const handleConnect = async () => {
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const newConn = await createConnection.mutateAsync({
+        provider: "youtube",
+        label: "YouTube Channel",
+      });
+      const authRes = await authorize.mutateAsync(newConn.id);
+      if (authRes?.authorization_url) {
+        window.location.href = authRes.authorization_url;
+      }
+    } catch (exc) {
+      setConnectError(exc instanceof ApiError ? exc.message : "Could not initiate channel connection.");
+      setConnecting(false);
+    }
+  };
+
+  const handleUnlink = async (connectionId: number, handle: string) => {
+    setOpenMenuId(null);
+    if (!window.confirm(`Unlink ${handle}? This will disconnect the channel from Hexton.`)) {
+      return;
+    }
+    setDeletingId(connectionId);
+    try {
+      await deleteConnection.mutateAsync({ id: connectionId, force: true });
+    } catch (exc) {
+      setConnectError(exc instanceof ApiError ? exc.message : "Could not unlink account.");
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const handleRelink = async (connectionId: number) => {
+    setOpenMenuId(null);
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const authRes = await authorize.mutateAsync(connectionId);
+      if (authRes?.authorization_url) {
+        window.location.href = authRes.authorization_url;
+      }
+    } catch (exc) {
+      setConnectError(exc instanceof ApiError ? exc.message : "Could not re-link connection.");
+      setConnecting(false);
+    }
+  };
+
+  const handleRefresh = async (connectionId: number) => {
+    setOpenMenuId(null);
+    try {
+      await refreshIdentities.mutateAsync(connectionId);
+    } catch (exc) {
+      setConnectError(exc instanceof ApiError ? exc.message : "Could not refresh account.");
+    }
+  };
 
   return (
-    <section className="card p-5" aria-label={`Connection ${connection.label}`}>
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h2 className="text-base font-semibold">{connection.label}</h2>
-            <StatusChip status={connection.status} />
-          </div>
-          <p className="mt-1 text-xs text-ink-faint">
-            {connection.provider} · {connection.public_id} ·{" "}
-            {connection.channels.length} channel{connection.channels.length === 1 ? "" : "s"} resolved
-          </p>
-          {connection.granted_at && (
-            <p className="mt-0.5 text-xs text-ink-faint">
-              Authorized {formatWhen(connection.granted_at)}
-              {connection.scopes.length > 0 && ` · ${connection.scopes.length} scope${connection.scopes.length === 1 ? "" : "s"}`}
-            </p>
-          )}
-          {connection.token_expires_at && (
-            <p
-              className={`mt-0.5 text-xs ${
-                Date.parse(connection.token_expires_at) < Date.now() + 7 * 86400_000
-                  ? "text-cue-attention"
-                  : "text-ink-faint"
-              }`}
-            >
-              Credential expires {formatWhen(connection.token_expires_at)}
-              {Date.parse(connection.token_expires_at) < Date.now() && " — reauthorization required"}
-            </p>
-          )}
-          {connection.revoked_at && (
-            <p className="mt-0.5 text-xs text-cue-attention">
-              Revoke recorded {formatWhen(connection.revoked_at)}
-              {connection.authorized_data_deleted_at
-                ? ` · Authorized Data deleted ${formatWhen(connection.authorized_data_deleted_at)}`
-                : " · Authorized Data deletion due within 7 calendar days"}
-            </p>
-          )}
-        </div>
+    <div className="flex flex-col gap-6 max-w-5xl mx-auto w-full px-2 sm:px-4 py-2">
+      {/* Top Header matching Reference Image */}
+      <div className="flex flex-col gap-4">
+        <h1 className="text-xl font-bold tracking-tight text-white">Settings</h1>
 
-        <div className="flex flex-wrap gap-2">
-          <button
-            className="btn"
-            disabled={authorize.isPending || revoked}
-            title={revoked ? "This connection was revoked. Create a new authorization instead." : undefined}
-            onClick={() =>
-              authorize.mutate(connection.id, {
-                onSuccess: (data) => {
-                  if (data?.authorization_url) {
-                    window.location.href = data.authorization_url;
-                  }
-                  setError(null);
-                },
-                onError: fail,
-              })
-            }
-          >
-            {active ? "Reauthorize" : "Authorize with Google"}
-          </button>
-          <button
-            className="btn"
-            disabled={refresh.isPending || revoked}
-            onClick={() => refresh.mutate(connection.id, { onSuccess: () => setError(null), onError: fail })}
-          >
-            Refresh identities
-          </button>
-          {active ? (
-            <button
-              className="btn"
-              disabled={disable.isPending}
-              onClick={() =>
-                disable.mutate(connection.id, {
-                  onSuccess: (data) => {
-                    setResult(data);
-                    setError(null);
-                  },
-                  onError: fail,
-                })
-              }
-            >
-              Disable connection
-            </button>
-          ) : (
-            <button
-              className="btn"
-              disabled={enable.isPending || revoked}
-              onClick={() =>
-                enable.mutate(connection.id, {
-                  onSuccess: (data) => {
-                    setResult(data);
-                    setError(null);
-                  },
-                  onError: fail,
-                })
-              }
-            >
-              Enable connection
-            </button>
-          )}
-          <button
-            className="btn btn-danger"
-            disabled={revoke.isPending || revoked}
-            onClick={() => {
-              if (
-                window.confirm(
-                  "Revoke this authorization? Hexton deletes the stored credential immediately and must " +
-                    "delete the Authorized Data within 7 calendar days. This is not the same as disabling it.",
-                )
-              ) {
-                revoke.mutate(connection.id, {
-                  onSuccess: (data) => {
-                    setResult(data);
-                    setError(null);
-                  },
-                  onError: fail,
-                });
-              }
-            }}
-          >
-            Revoke authorization
-          </button>
-        </div>
-      </div>
-
-      {diagnostic.data && (
-        <p
-          className={`mt-3 rounded-md border px-3 py-2 text-xs ${
-            diagnostic.data.code === "ok"
-              ? "border-cue-success/40 bg-cue-success/10 text-cue-success"
-              : "border-edge bg-canvas text-ink-muted"
-          }`}
-        >
-          <span className="font-medium">{diagnostic.data.code}</span> — {diagnostic.data.remedy}
-          {diagnostic.data.detail && <span className="text-ink-faint"> ({diagnostic.data.detail})</span>}
-        </p>
-      )}
-
-      {error && (
-        <p role="alert" className="mt-3 rounded-md border border-cue-warning/50 bg-cue-warning/10 px-3 py-2 text-xs text-cue-warning">
-          {error}
-        </p>
-      )}
-
-      {result && <ActionResult result={result} onDismiss={() => setResult(null)} />}
-
-      <div className="mt-4 border-t border-edge pt-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h3 className="text-xs font-medium uppercase tracking-wide text-ink-muted">
-            Verified channel identities
-          </h3>
-          {connection.channels.some((c) => !c.operator_confirmed_at) && (
+        <div className="flex items-center justify-between gap-4 flex-wrap pb-1">
+          {/* Tabs: Profile | Connected accounts */}
+          <div className="flex items-center gap-1.5 bg-[#141518] p-1 rounded-xl border border-white/[0.06]">
             <button
               type="button"
-              className="btn btn-primary text-xs px-2.5 py-1"
-              disabled={confirmChannel.isPending}
-              onClick={() => {
-                connection.channels
-                  .filter((c) => !c.operator_confirmed_at)
-                  .forEach((c) => confirmChannel.mutate(c.id));
-              }}
+              className={`px-4 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all ${
+                activeTab === "profile"
+                  ? "bg-[#27272a] text-white shadow-sm"
+                  : "text-zinc-400 hover:text-white"
+              }`}
+              onClick={() => setActiveTab("profile")}
             >
-              {confirmChannel.isPending ? "Confirming…" : "Confirm all channels"}
+              Profile
             </button>
-          )}
+            <button
+              type="button"
+              className={`px-4 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all ${
+                activeTab === "connected"
+                  ? "bg-[#27272a] text-white shadow-sm font-semibold"
+                  : "text-zinc-400 hover:text-white"
+              }`}
+              onClick={() => setActiveTab("connected")}
+            >
+              Connected accounts
+            </button>
+          </div>
+
+          {/* Action & User Profile Info */}
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              className="bg-[#ff5500] hover:bg-[#e04b00] active:scale-[0.98] text-white font-medium text-xs sm:text-sm px-4 py-2 rounded-xl flex items-center gap-2 shadow-lg shadow-orange-950/40 transition-all shrink-0 cursor-pointer disabled:opacity-50"
+              disabled={connecting || createConnection.isPending || authorize.isPending}
+              onClick={handleConnect}
+            >
+              <IconPlus size={16} />
+              <span>{connecting ? "Opening Google…" : "Connect account"}</span>
+            </button>
+          </div>
         </div>
-        {connection.channels.length === 0 ? (
-          <p className="mt-2 text-sm text-ink-faint">
-            No channel identity has been resolved from this authorization yet. Use
-            “Refresh identities” once the connection is active.
+      </div>
+
+      {connectError && (
+        <div
+          role="alert"
+          className="rounded-xl border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-xs text-rose-400 flex items-center justify-between gap-2"
+        >
+          <div className="flex items-center gap-2">
+            <IconAlertTriangle size={15} />
+            <span>{connectError}</span>
+          </div>
+          <button
+            type="button"
+            className="text-xs text-zinc-400 hover:text-white"
+            onClick={() => setConnectError(null)}
+          >
+            ✕
+          </button>
+        </div>
+      )}
+
+      {activeTab === "profile" ? (
+        <div className="rounded-2xl border border-white/[0.08] bg-[#141518] p-6 text-sm text-zinc-300">
+          <h2 className="text-base font-semibold text-white mb-2">Profile & Settings</h2>
+          <p className="text-xs text-zinc-400 mb-4">
+            Manage your local Hexton Scheduler environment and preferences.
           </p>
-        ) : (
-          <ul className="mt-3 flex flex-col gap-3">
-            {connection.channels.map((channel) => (
-              <li key={channel.id} className="rounded-md border border-edge bg-canvas p-3">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <div className="font-medium">{channel.title}</div>
-                    <div className="mt-0.5 text-xs text-ink-faint">
-                      {channel.handle ? `${channel.handle} · ` : ""}
-                      <span className="font-mono">{channel.channel_id}</span>
+          <div className="flex items-center gap-3">
+            <Link to="/settings" className="btn btn-secondary text-xs">
+              Open Full Settings & Diagnostics →
+            </Link>
+          </div>
+        </div>
+      ) : (
+        <>
+          {/* Filter Pills and Search Bar Toolbar matching Reference Image */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            {/* Filter pills */}
+            <div className="flex items-center gap-2 overflow-x-auto py-1">
+              <button
+                type="button"
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  filterPlatform === "all"
+                    ? "bg-[#27272a] text-white border border-white/10"
+                    : "text-zinc-400 hover:text-white hover:bg-white/[0.04]"
+                }`}
+                onClick={() => setFilterPlatform("all")}
+              >
+                All {allAccounts.length}
+              </button>
+
+              <button
+                type="button"
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium flex items-center gap-1.5 transition-all ${
+                  filterPlatform === "youtube"
+                    ? "bg-[#27272a] text-white border border-white/10"
+                    : "text-zinc-400 hover:text-white hover:bg-white/[0.04]"
+                }`}
+                onClick={() => setFilterPlatform("youtube")}
+              >
+                <IconYouTube size={14} className="text-zinc-300" />
+                <span>{allAccounts.length}</span>
+              </button>
+            </div>
+
+            {/* Search Input */}
+            <div className="relative w-full sm:w-64">
+              <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3 text-zinc-500">
+                <IconSearch size={14} />
+              </div>
+              <input
+                type="text"
+                placeholder="Search account..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="w-full rounded-xl bg-[#141518] border border-white/[0.08] pl-9 pr-3 py-1.5 text-xs sm:text-sm text-white placeholder-zinc-500 focus:outline-none focus:border-white/20 transition-colors"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery("")}
+                  className="absolute inset-y-0 right-0 flex items-center pr-2.5 text-zinc-500 hover:text-white text-xs"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Accounts List matching Reference Image */}
+          {connections.isLoading ? (
+            <div className="py-20 text-center">
+              <p className="text-xs text-zinc-500 animate-pulse">Loading connected accounts…</p>
+            </div>
+          ) : filteredAccounts.length === 0 ? (
+            <div className="rounded-2xl border border-white/[0.08] bg-[#141518]/60 p-10 text-center flex flex-col items-center justify-center">
+              <div className="h-12 w-12 rounded-2xl bg-white/[0.05] border border-white/[0.08] flex items-center justify-center text-zinc-400 mb-3">
+                <IconYouTube size={22} />
+              </div>
+              <p className="text-sm font-medium text-white">
+                {searchQuery ? "No accounts found matching your search" : "No accounts connected yet"}
+              </p>
+              <p className="text-xs text-zinc-400 mt-1 max-w-sm">
+                {searchQuery
+                  ? "Try searching for a different handle or channel name."
+                  : "Connect your YouTube channels to start scheduling uploads automatically."}
+              </p>
+              {!searchQuery && (
+                <button
+                  type="button"
+                  className="bg-[#ff5500] hover:bg-[#e04b00] text-white text-xs font-semibold px-4 py-2 rounded-xl mt-4 cursor-pointer"
+                  onClick={handleConnect}
+                  disabled={connecting}
+                >
+                  {connecting ? "Opening Google…" : "+ Connect account"}
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2.5" ref={menuRef}>
+              {filteredAccounts.map((account) => {
+                const isMenuOpen = openMenuId === account.id;
+                const isDeleting = deletingId === account.connectionId;
+
+                return (
+                  <div
+                    key={account.id}
+                    className="group relative flex items-center justify-between gap-3 rounded-2xl border border-white/[0.06] bg-[#141518] hover:bg-[#18191d] px-4 py-3 transition-colors"
+                  >
+                    {/* Left: Platform Icon + Handle & Platform name */}
+                    <div className="flex items-center gap-3.5 min-w-0">
+                      <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white/[0.05] border border-white/[0.06] text-white">
+                        <IconYouTube size={20} className="text-red-500" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-white tracking-tight truncate">
+                          {account.handle}
+                        </p>
+                        <p className="text-xs text-zinc-400 mt-0.5 font-normal">
+                          {account.platform}
+                          {account.title && account.title !== account.handle.replace(/^@/, "") && (
+                            <span className="text-zinc-500 ml-1.5 font-normal">· {account.title}</span>
+                          )}
+                        </p>
+                      </div>
                     </div>
-                    <div className="mt-0.5 text-xs text-ink-faint">
-                      Source: {channel.verification_source}
-                      {channel.verified_at && ` · resolved ${formatWhen(channel.verified_at)}`}
+
+                    {/* Right: Status Pill & 3-Dots Action Menu */}
+                    <div className="flex items-center gap-2.5 shrink-0 relative">
+                      {account.needsRelink && (
+                        <div className="flex items-center gap-1.5 rounded-full border border-amber-500/20 bg-amber-500/10 px-2.5 py-0.5 text-xs font-medium text-amber-400">
+                          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                          <span>• Re-link needed</span>
+                        </div>
+                      )}
+
+                      {/* Three-dots menu button */}
+                      <button
+                        type="button"
+                        className={`p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-white/[0.06] transition-colors cursor-pointer ${
+                          isMenuOpen ? "bg-white/[0.08] text-white" : ""
+                        }`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenMenuId(isMenuOpen ? null : account.id);
+                        }}
+                        aria-label="Account actions"
+                      >
+                        <IconMoreVertical size={16} />
+                      </button>
+
+                      {/* Dropdown Popover matching Reference Image */}
+                      {isMenuOpen && (
+                        <div
+                          className="absolute right-0 top-full mt-1.5 z-30 min-w-[160px] rounded-xl border border-white/[0.1] bg-[#1a1b1f] p-1.5 shadow-2xl backdrop-blur-md animate-in fade-in zoom-in-95 duration-100"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          {account.needsRelink && (
+                            <button
+                              type="button"
+                              className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-amber-400 hover:bg-amber-500/10 rounded-lg text-left transition-colors cursor-pointer"
+                              onClick={() => handleRelink(account.connectionId)}
+                            >
+                              <IconRefreshCw size={13} />
+                              <span>Re-link account</span>
+                            </button>
+                          )}
+
+                          {account.channelId && (
+                            <a
+                              href={`https://youtube.com/channel/${account.channelId}`}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              className="w-full flex items-center justify-between px-3 py-2 text-xs text-zinc-300 hover:text-white hover:bg-white/[0.06] rounded-lg transition-colors"
+                              onClick={() => setOpenMenuId(null)}
+                            >
+                              <span>View on YouTube</span>
+                              <IconExternalLink size={12} className="text-zinc-500" />
+                            </a>
+                          )}
+
+                          <button
+                            type="button"
+                            className="w-full flex items-center gap-2 px-3 py-2 text-xs text-zinc-300 hover:text-white hover:bg-white/[0.06] rounded-lg text-left transition-colors cursor-pointer"
+                            onClick={() => handleRefresh(account.connectionId)}
+                          >
+                            <IconRefreshCw size={13} className="text-zinc-500" />
+                            <span>Refresh identity</span>
+                          </button>
+
+                          <div className="h-px bg-white/[0.06] my-1" />
+
+                          <button
+                            type="button"
+                            className="w-full flex items-center gap-2 px-3 py-2 text-xs font-medium text-rose-500 hover:bg-rose-500/10 hover:text-rose-400 rounded-lg text-left transition-colors cursor-pointer"
+                            disabled={isDeleting}
+                            onClick={() => handleUnlink(account.connectionId, account.handle)}
+                          >
+                            <IconTrash size={13} />
+                            <span>{isDeleting ? "Unlinking…" : "Unlink"}</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
                   </div>
-                  <div className="flex flex-wrap items-center justify-end gap-2 text-right">
-                    {channel.operator_confirmed_at ? (
-                      <>
-                        <span className="text-xs font-medium text-cue-success">
-                          ✓ Confirmed by you {formatWhen(channel.operator_confirmed_at)}
-                        </span>
-                        <button
-                          type="button"
-                          className="btn text-xs px-2 py-0.5 text-ink-muted"
-                          disabled={unconfirmChannel.isPending}
-                          onClick={() => unconfirmChannel.mutate(channel.id)}
-                          title="Revoke confirmation for publishing"
-                        >
-                          Unconfirm
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="text-xs text-cue-attention">
-                          Not confirmed — never used for publishing
-                        </span>
-                        <button
-                          type="button"
-                          className="btn text-xs px-3 py-1 font-medium bg-cue-success/20 text-cue-success border-cue-success/40 hover:bg-cue-success/30"
-                          disabled={confirmChannel.isPending}
-                          onClick={() => confirmChannel.mutate(channel.id)}
-                        >
-                          {confirmChannel.isPending ? "Confirming…" : "Confirm channel"}
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                {channel.is_brand_candidate && (
-                  <p className="mt-2 rounded border border-cue-attention/40 bg-cue-attention/10 px-2.5 py-1.5 text-xs text-cue-attention">
-                    This identity looks like a brand-account channel. Phase 0 recorded
-                    the brand-account publishing path as unverified (DF-18): Hexton will
-                    not treat this label as proof the connection can publish to it until
-                    a second identity has been authorized and the path is confirmed.
-                  </p>
-                )}
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function StatusChip({ status }: { status: string }) {
-  const good = status === "active" || status === "enabled" || status === "connected";
-  const bad = status === "revoked" || status === "deleted";
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-xs font-medium ${
-        good
-          ? "border-cue-success/50 bg-cue-success/10 text-cue-success"
-          : bad
-            ? "border-cue-warning/50 bg-cue-warning/10 text-cue-warning"
-            : "border-cue-attention/50 bg-cue-attention/10 text-cue-attention"
-      }`}
-    >
-      {status}
-    </span>
-  );
-}
-
-/**
- * What a disable or a revoke actually did.
- *
- * `did_not` is rendered as prominently as `did`. `COMP-07` exists so an operator can
- * tell the two operations apart from the result, without having to remember which one
- * they pressed.
- */
-function ActionResult({ result, onDismiss }: { result: ConnectionAction; onDismiss: () => void }) {
-  return (
-    <div className="mt-3 rounded-md border border-edge bg-canvas p-3 text-xs">
-      <div className="flex items-start justify-between gap-3">
-        <p className="font-medium text-ink">Status now: {result.status}</p>
-        <button className="btn px-2 py-0.5 text-[11px]" onClick={onDismiss}>
-          Dismiss
-        </button>
-      </div>
-      <p className="mt-1 text-ink-muted">{result.explanation}</p>
-      <ul className="mt-2 grid gap-1 sm:grid-cols-2">
-        <li className="text-cue-success">
-          Did: {result.did.length ? result.did.join("; ") : "nothing further"}
-        </li>
-        <li className="text-cue-attention">
-          Did not: {result.did_not.length ? result.did_not.join("; ") : "nothing further"}
-        </li>
-      </ul>
-      {result.authorized_data_retention_days !== null && (
-        <p className="mt-1 text-ink-faint">
-          Authorized Data retention: {result.authorized_data_retention_days} calendar days.
-        </p>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
     </div>
   );

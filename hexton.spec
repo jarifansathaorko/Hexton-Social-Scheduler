@@ -12,6 +12,8 @@ datas = [
     (str(BACKEND_DIR / "migrations"), "migrations"),
 ]
 
+from PyInstaller.utils.hooks import collect_submodules
+
 hiddenimports = [
     "uvicorn",
     "uvicorn.logging",
@@ -35,28 +37,16 @@ hiddenimports = [
     "sse_starlette",
     "tzdata",
     "zoneinfo",
-    "hexton",
-    "hexton.api.app",
-    "hexton.api.routers.compliance",
-    "hexton.api.routers.dashboard",
-    "hexton.api.routers.events",
-    "hexton.api.routers.jobs",
-    "hexton.api.routers.media",
-    "hexton.api.routers.mentions",
-    "hexton.api.routers.reporting",
-    "hexton.api.routers.connections",
-    "hexton.cli",
-    "hexton.worker",
-    "hexton.worker.main",
-    "hexton.worker.runner",
-    "hexton.worker.sweep",
-    "hexton.worker.heartbeat",
-    "hexton.worker.report_sync",
-    "hexton.worker.lease",
-    "hexton.media.picker",
-    "hexton.connectors.youtube",
-    "hexton.connectors.sheets_live",
-    "hexton.connectors.fake",
+    "googleapiclient",
+    "googleapiclient.discovery",
+    "googleapiclient.http",
+    "googleapiclient.errors",
+    "google.oauth2",
+    "google.oauth2.credentials",
+    "google.auth",
+    "google.auth.transport",
+    "google.auth.transport.requests",
+    *collect_submodules("hexton"),
 ]
 
 a = Analysis(

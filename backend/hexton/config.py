@@ -36,12 +36,17 @@ def default_data_dir() -> Path:
 
 
 def _env_files() -> tuple[str, ...]:
-    files = [".env"]
+    candidates: list[str] = [".env"]
+    here = Path(__file__).resolve()
+    for parent_dir in (here.parents[1], here.parents[2]):
+        env_path = parent_dir / ".env"
+        if env_path.is_file() and str(env_path) not in candidates:
+            candidates.append(str(env_path))
     if getattr(sys, "frozen", False):
         exe_env = Path(sys.executable).parent / ".env"
-        if exe_env.is_file():
-            files.append(str(exe_env))
-    return tuple(files)
+        if exe_env.is_file() and str(exe_env) not in candidates:
+            candidates.append(str(exe_env))
+    return tuple(candidates)
 
 
 class Settings(BaseSettings):
@@ -95,8 +100,8 @@ class Settings(BaseSettings):
 
     # --- scheduling --------------------------------------------------------
     display_timezone: str = "Asia/Dhaka"
-    min_lead_minutes: int = 30
-    warning_lead_minutes: int = 120
+    min_lead_minutes: int = 0
+    warning_lead_minutes: int = 0
     missed_grace_minutes: int = 5
 
     # --- worker ------------------------------------------------------------
